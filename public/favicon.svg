@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Garment Worker Management icon">
+  <defs>
+    <linearGradient id="bg" x1="10" y1="8" x2="54" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2563eb"/>
+      <stop offset="1" stop-color="#0f766e"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="url(#bg)"/>
+  <path fill="#fff" d="M23 18h7l2 4 2-4h7l8 8-6 7-3-2v17H24V31l-3 2-6-7 8-8Zm5 6h-3l-4 4 1 1 6-4v17h8V25l6 4 1-1-4-4h-3l-4 8-4-8Z"/>
+  <path fill="#dbeafe" d="M16 46h32v4H16v-4Zm8-8h16v3H24v-3Z"/>
+  <circle cx="47" cy="18" r="4" fill="#facc15"/>
+</svg>
