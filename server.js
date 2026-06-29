@@ -4,6 +4,7 @@ import { extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)));
+const publicRoot = join(root, "public");
 const port = Number(process.env.PORT || 8080);
 
 const mimeTypes = {
@@ -30,6 +31,8 @@ function fileForUrl(url) {
   const requested = resolve(join(root, normalized));
   if (!requested.startsWith(root)) return join(root, "index.html");
   if (existsSync(requested) && statSync(requested).isFile()) return requested;
+  const publicFile = resolve(join(publicRoot, normalized));
+  if (publicFile.startsWith(publicRoot) && existsSync(publicFile) && statSync(publicFile).isFile()) return publicFile;
   return join(root, "index.html");
 }
 
