@@ -35,6 +35,7 @@
   let filters = { search: "", status: "all" };
   let modal = null;
   let notice = "";
+  let filterTimer = 0;
 
   function route() {
     return window.location.pathname.toLowerCase().replace(/\/+$/, "") === "/super-admin";
@@ -523,6 +524,19 @@
     root.innerHTML = `<main class="sa-shell">${nav()}<section class="sa-main"><div class="sa-top"><div><h1>${section === "dashboard" ? "Super Admin Dashboard" : section[0].toUpperCase() + section.slice(1)}</h1><p>Companies, subscription, security aur platform control center.</p></div><div class="sa-actions"><span class="sa-note">System Health: OK · ${num(t.users)} users</span></div></div>${notice ? `<div class="sa-note">${esc(notice)}</div>` : ""}${currentSection()}</section>${modalHtml()}</main>`;
   }
 
+  function userIsTyping() {
+    const active = document.activeElement;
+    if (!active) return false;
+    const tag = String(active.tagName || "").toLowerCase();
+    return tag === "input" || tag === "select" || tag === "textarea" || Boolean(active.closest?.("form"));
+  }
+
+  function renderWhenIdle() {
+    if (!route()) return;
+    if (userIsTyping()) return;
+    renderApp();
+  }
+
   function updateFactory(id, patch, action) {
     let changed = null;
     const rows = factories().map((row) => {
@@ -690,7 +704,8 @@
     const filter = event.target?.dataset?.saFilter;
     if (!filter) return;
     filters[filter] = event.target.value;
-    renderApp();
+    window.clearTimeout(filterTimer);
+    filterTimer = window.setTimeout(renderApp, 180);
   });
 
   document.addEventListener("change", (event) => {
@@ -702,7 +717,5 @@
   });
 
   setTimeout(renderApp, 160);
-  setInterval(() => {
-    if (route()) renderApp();
-  }, 2500);
+  setInterval(renderWhenIdle, 2500);
 })();
