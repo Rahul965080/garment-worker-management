@@ -6,9 +6,9 @@
   const STAFF_SESSION_KEY = "garmentworks_staff_session";
   const WORKER_SESSION_KEY = "garmentworks_worker_session";
   const DEFAULT_FACTORY = {
-    id: "demo",
-    code: "DEMO",
-    name: "Demo Factory",
+    id: "factory",
+    code: "FACTORY",
+    name: "Registered Factory",
   };
 
   let renderTimer = 0;
