@@ -37,6 +37,10 @@
     return String(value || "").trim().toLowerCase();
   }
 
+  function cleanMobile(value) {
+    return String(value || "").replace(/\D/g, "");
+  }
+
   function scopedKey(baseKey, factoryId) {
     const id = String(factoryId || "").trim();
     return !id || id === "demo" ? baseKey : `${baseKey}_${id}`;
@@ -158,6 +162,67 @@
     return String(password || "").trim().length >= 4;
   }
 
+  function factoryDisplayCode(factory) {
+    return String(factory?.code || factory?.factoryCode || factory?.id || factory?.factoryId || "").trim() || "UNKNOWN";
+  }
+
+  function ownerEmail(factory) {
+    return lower(factory?.email || factory?.ownerEmail || factory?.adminEmail || "");
+  }
+
+  function ownerMobile(factory) {
+    return cleanMobile(factory?.mobile || factory?.ownerMobile || factory?.adminMobile || "");
+  }
+
+  function adminMember(factory) {
+    const factoryId = String(factory?.id || factory?.factoryId || factory?.code || factory?.factoryCode || "").trim();
+    return (
+      staffRows(factoryId).find((row) => {
+        return String(row?.role || "").toLowerCase() === "admin";
+      }) || null
+    );
+  }
+
+  function formValues(form) {
+    const data = new FormData(form);
+    const values = {};
+    data.forEach((value, key) => {
+      values[key] = String(value || "").trim();
+    });
+    return values;
+  }
+
+  function createAccountIdentity(values) {
+    const email = lower(values.email || values.adminEmail || values.ownerEmail || "");
+    const mobile = cleanMobile(values.mobile || values.adminMobile || values.ownerMobile || "");
+    return { email, mobile };
+  }
+
+  function duplicateFactoryByIdentity(identity) {
+    if (!identity.email && !identity.mobile) return null;
+    return factories()
+      .map(normalizeFactory)
+      .filter(Boolean)
+      .find((factory) => {
+        const admin = adminMember(factory);
+        const emails = [ownerEmail(factory), lower(admin?.email || "")].filter(Boolean);
+        const mobiles = [ownerMobile(factory), cleanMobile(admin?.mobile || "")].filter(Boolean);
+        return (
+          (!!identity.email && emails.includes(identity.email)) ||
+          (!!identity.mobile && mobiles.includes(identity.mobile))
+        );
+      }) || null;
+  }
+
+  function validateCreateAccount(form) {
+    const identity = createAccountIdentity(formValues(form));
+    if (!identity.email && !identity.mobile) return "";
+    const duplicate = duplicateFactoryByIdentity(identity);
+    if (!duplicate) return "";
+    const code = factoryDisplayCode(duplicate);
+    return `Is email/mobile se account pehle se bana hua hai. Naya account create nahi hoga. Old Factory Code: ${code}`;
+  }
+
   function validateLogin(form, type, factory) {
     if (!factory) return "Factory code/name nahi mila. Sahi factory code ya exact factory name daalo.";
     const password = field(form, "password");
@@ -241,7 +306,17 @@
     const type = routeType();
     if (!type) return;
     const mode = formMode(form);
-    if (mode === "create") return;
+    if (mode === "create") {
+      const message = validateCreateAccount(form);
+      if (message) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        showError(form, message);
+        return;
+      }
+      clearError(form);
+      return;
+    }
 
     const factory = hardenFactoryInput(form);
     const message = mode === "forgot" ? validateForgot(form, type, factory) : validateLogin(form, type, factory);
