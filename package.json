@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "echo \"Static bundle ready\"",
-    "start": "vite --host 0.0.0.0 --port $PORT",
+    "start": "node server.js",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
