@@ -3,7 +3,7 @@
   const BUTTON_ID = "factory-code-recovery-button";
   const MODAL_ID = "factory-code-recovery-modal";
   const FACTORIES_KEY = "garmentworks_factories";
-  const DEFAULT_FACTORY = { id: "demo", code: "DEMO", name: "Demo Factory" };
+  const DEFAULT_FACTORY = { id: "factory", code: "FACTORY", name: "Registered Factory" };
   const DB_KEYS = {
     staff: "garmentworks_db_staff",
     workers: "garmentworks_db_workers",
@@ -55,7 +55,6 @@
 
   function allFactories() {
     const byId = new Map();
-    byId.set(DEFAULT_FACTORY.id, { ...DEFAULT_FACTORY });
 
     const stored = readJson(FACTORIES_KEY, []);
     if (Array.isArray(stored)) {
@@ -257,7 +256,7 @@
         <form class="factory-recovery-form">
           <label class="field">
             <span>${escapeHtml(portalLabel(type))}</span>
-            <input type="text" name="query" placeholder="Example: admin@factory.in ya 9810001122" autocomplete="username" required>
+            <input type="text" name="query" placeholder="Example: owner@yourfactory.com ya registered mobile" autocomplete="username" required>
           </label>
           <div class="factory-recovery-note">Security ke liye exact email/mobile match par hi code dikhaya jayega. Galat detail par factory list show nahi hogi.</div>
           <button class="primary-button" type="submit">Find Factory Code</button>
