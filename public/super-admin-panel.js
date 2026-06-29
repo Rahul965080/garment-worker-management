@@ -516,6 +516,7 @@
   }
 
   function renderSetup() {
+    const isReset = Boolean(window.__superAdminResetLogin);
     return `
       <main class="super-admin-login">
         <section class="super-card">
@@ -524,14 +525,18 @@
             <a class="super-ghost" href="/">Home</a>
           </div>
           <div>
-            <h1>Super Admin Setup</h1>
-            <p>Pehli baar ek master login banao. Iske baad isi se companies aur subscription manage honge.</p>
+            <h1>${isReset ? "Reset Super Admin Login" : "Super Admin Setup"}</h1>
+            <p>${isReset ? "Naya email/password set karo. Company data delete nahi hoga." : "Pehli baar ek master login banao. Iske baad isi se companies aur subscription manage honge."}</p>
           </div>
+          ${notice ? `<div class="super-note">${escapeHtml(notice)}</div>` : ""}
           <form class="super-form" data-super-setup>
             ${field("Super Admin Email", `<input name="email" type="email" placeholder="owner@example.com" required>`)}
             ${field("Password", `<input name="password" type="password" minlength="6" placeholder="Minimum 6 characters" required>`)}
             ${field("Confirm Password", `<input name="confirm" type="password" minlength="6" required>`)}
-            <button class="super-button" type="submit">Create Super Admin</button>
+            <div class="super-actions">
+              ${isReset ? `<button class="super-ghost" type="button" data-cancel-reset-login>Cancel</button>` : ""}
+              <button class="super-button" type="submit">${isReset ? "Save New Login" : "Create Super Admin"}</button>
+            </div>
           </form>
           <div class="super-warning">Security note: current app browser storage par chal raha hai. Real public SaaS ke liye backend auth/database zaruri hoga.</div>
         </section>
@@ -557,6 +562,7 @@
             ${field("Password", `<input name="password" type="password" autocomplete="current-password" required>`)}
             <button class="super-button" type="submit">Login Super Admin</button>
           </form>
+          <button class="super-ghost" type="button" data-super-reset-login>Forgot / Reset Super Admin Login</button>
         </section>
       </main>
     `;
@@ -752,7 +758,8 @@
       root.innerHTML = renderChangeLogin();
       return;
     }
-    if (!credentials()) root.innerHTML = renderSetup();
+    if (window.__superAdminResetLogin) root.innerHTML = renderSetup();
+    else if (!credentials()) root.innerHTML = renderSetup();
     else if (!sessionActive()) root.innerHTML = renderLogin();
     else root.innerHTML = renderDashboard();
   }
@@ -790,6 +797,7 @@
     writeJson(SUPER_CREDENTIALS_KEY, { email, password, updatedAt: new Date().toISOString() });
     writeJson(SUPER_SESSION_KEY, { email, loginAt: Date.now() });
     window.__superAdminChangeLogin = false;
+    window.__superAdminResetLogin = false;
     setNotice("Super Admin login save ho gaya.");
   }
 
@@ -902,8 +910,16 @@
       } else if (event.target.closest("[data-super-change-password]")) {
         window.__superAdminChangeLogin = true;
         render();
+      } else if (event.target.closest("[data-super-reset-login]")) {
+        window.__superAdminResetLogin = true;
+        notice = "Naya Super Admin login set karo. Company data safe rahega.";
+        render();
       } else if (event.target.closest("[data-cancel-change-login]")) {
         window.__superAdminChangeLogin = false;
+        render();
+      } else if (event.target.closest("[data-cancel-reset-login]")) {
+        window.__superAdminResetLogin = false;
+        notice = "";
         render();
       } else if (event.target.closest("[data-cancel-delete]")) {
         deleteTarget = null;
