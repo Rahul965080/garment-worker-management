@@ -161,23 +161,28 @@
   }
 
   function setNativeInputValue(input, value) {
+    input.dataset.productionSystemChange = "true";
     const prototype = Object.getPrototypeOf(input);
     const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
     if (descriptor?.set) descriptor.set.call(input, value);
     else input.value = value;
     input.dispatchEvent(new Event("input", { bubbles: true }));
     input.dispatchEvent(new Event("change", { bubbles: true }));
+    delete input.dataset.productionSystemChange;
   }
 
   function cleanInputs(card) {
     card.querySelectorAll("input").forEach((input) => {
-      if (isDemoValue(input.value) || isDemoValue(input.defaultValue)) {
+      if (!input.dataset.productionInitialCleaned && !input.dataset.productionTouched && isDemoValue(input.value)) {
         setNativeInputValue(input, "");
         input.defaultValue = "";
         input.removeAttribute("value");
+        input.dataset.productionInitialCleaned = "true";
       }
+      const name = String(input.name || "").toLowerCase();
       const label = `${input.name || ""} ${input.placeholder || ""}`.toLowerCase();
-      if (label.includes("factory")) input.placeholder = "Factory code";
+      if (name === "factoryname" || (!name && label.includes("factory name"))) input.placeholder = "Factory name";
+      else if (!name && label.includes("factory code")) input.placeholder = "Factory code";
       if (label.includes("email")) input.placeholder = "registered email";
       if (label.includes("password")) input.placeholder = "Password";
     });
@@ -232,11 +237,28 @@
       if (form) form.insertAdjacentElement("afterend", error);
       else card.appendChild(error);
     }
-    error.textContent = "Public access ke liye sirf registered factory account ya assigned credentials use karein.";
+    error.textContent = "Demo login public mode me band hai. Create account karo ya registered factory credentials use karo.";
   }
 
-  function cardHasDemoValue(card) {
-    return Array.from(card.querySelectorAll("input")).some((input) => isDemoValue(input.value));
+  function inputValue(card, name) {
+    return String(card.querySelector(`[name="${name}"]`)?.value || "").trim().toLowerCase();
+  }
+
+  function cardHasDemoCredentials(card) {
+    const factoryCode = inputValue(card, "factoryCode");
+    if (factoryCode !== "demo") return false;
+
+    const email = inputValue(card, "email");
+    const workerId = inputValue(card, "workerId");
+    const password = inputValue(card, "password");
+    return (
+      (email === "admin@factory.in" && password === "admin123") ||
+      (email === "manager@factory.in" && password === "manager123") ||
+      (email === "entry@factory.in" && password === "entry123") ||
+      (workerId === "gw-1001" && password === "9876543101") ||
+      (workerId === "gw-1002" && password === "9876543102") ||
+      (workerId === "gw-1003" && password === "9876543103")
+    );
   }
 
   function blockDemoSubmit(event) {
@@ -248,7 +270,7 @@
       const text = String(clicked.innerText || clicked.value || "").toLowerCase();
       if (!text.includes("login")) return;
     }
-    if (!cardHasDemoValue(card)) return;
+    if (!cardHasDemoCredentials(card)) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     showError(card);
@@ -272,7 +294,19 @@
 
   document.addEventListener("submit", blockDemoSubmit, true);
   document.addEventListener("click", blockDemoSubmit, true);
-  document.addEventListener("input", scheduleRender, true);
+  document.addEventListener("beforeinput", (event) => {
+    const input = event.target;
+    if (input?.matches?.("input") && !input.dataset.productionSystemChange) {
+      input.dataset.productionTouched = "true";
+    }
+  }, true);
+  document.addEventListener("input", (event) => {
+    const input = event.target;
+    if (input?.matches?.("input") && !input.dataset.productionSystemChange) {
+      input.dataset.productionTouched = "true";
+    }
+    scheduleRender();
+  }, true);
   window.addEventListener("storage", scheduleRender);
   new MutationObserver(scheduleRender).observe(document.documentElement, { childList: true, subtree: true });
   setInterval(render, 1000);
