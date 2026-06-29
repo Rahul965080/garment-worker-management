@@ -4,6 +4,9 @@
   const MODAL_ID = "factory-code-recovery-modal";
   const FACTORIES_KEY = "garmentworks_factories";
   const DEFAULT_FACTORY = { id: "factory", code: "FACTORY", name: "Registered Factory" };
+  const BLOCKED_CODES = new Set(["DEMO", "FACTORY", "REGISTEREDFACTORY", "QA704249", "QB874680", "DUPQA1"]);
+  const BLOCKED_EMAILS = new Set(["admin@factory.in", "manager@factory.in", "entry@factory.in", "duplicate.qa@example.com"]);
+  const BLOCKED_MOBILES = new Set(["9810001122", "9810001133", "9810001144", "9999904249", "8888874680", "9000012345"]);
   const DB_KEYS = {
     staff: "garmentworks_db_staff",
     workers: "garmentworks_db_workers",
@@ -48,9 +51,50 @@
   }
 
   function factoryIdFromDbKey(key, baseKey) {
-    if (key === baseKey) return DEFAULT_FACTORY.id;
+    if (key === baseKey) return "";
     if (key.startsWith(`${baseKey}_`)) return key.slice(baseKey.length + 1);
     return "";
+  }
+
+  function isBlockedFactory(factory) {
+    const id = String(factory?.id || "").trim();
+    const code = String(factory?.code || "").trim();
+    const name = String(factory?.name || "").trim().toLowerCase();
+    const email = String(factory?.email || "").trim().toLowerCase();
+    const mobile = String(factory?.mobile || "").replace(/\D/g, "");
+    const compact = `${id}${code}${name}`.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    return (
+      BLOCKED_CODES.has(cleanCode(id)) ||
+      BLOCKED_CODES.has(cleanCode(code)) ||
+      compact.includes("DEMO") ||
+      compact.includes("TEST") ||
+      compact.includes("QAFATORY") ||
+      compact.includes("QAFACTORY") ||
+      compact.includes("QBFACTORY") ||
+      compact.includes("DUPLICATE") ||
+      name === "registered factory" ||
+      email.endsWith("@factory.test") ||
+      BLOCKED_EMAILS.has(email) ||
+      BLOCKED_MOBILES.has(mobile)
+    );
+  }
+
+  function isBlockedMember(member) {
+    const email = String(member?.email || "").trim().toLowerCase();
+    const mobile = String(member?.mobile || member?.phone || "").replace(/\D/g, "");
+    const workerId = String(member?.workerId || "").trim().toLowerCase();
+    const factoryId = String(member?.factoryId || member?.factory || member?.factoryCode || "").trim();
+    return (
+      BLOCKED_EMAILS.has(email) ||
+      email.endsWith("@factory.test") ||
+      BLOCKED_MOBILES.has(mobile) ||
+      ["gw-1001", "gw-1002", "gw-1003"].includes(workerId) ||
+      BLOCKED_CODES.has(cleanCode(factoryId))
+    );
+  }
+
+  function cleanCode(value) {
+    return String(value || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
   }
 
   function allFactories() {
@@ -58,14 +102,14 @@
 
     const stored = readJson(FACTORIES_KEY, []);
     if (Array.isArray(stored)) {
-      stored.map(normalizeFactory).filter(Boolean).forEach((factory) => byId.set(factory.id, factory));
+      stored.map(normalizeFactory).filter(Boolean).filter((factory) => !isBlockedFactory(factory)).forEach((factory) => byId.set(factory.id, factory));
     }
 
     for (let index = 0; index < window.localStorage.length; index += 1) {
       const key = window.localStorage.key(index);
       Object.values(DB_KEYS).forEach((baseKey) => {
         const factoryId = factoryIdFromDbKey(key, baseKey);
-        if (factoryId && !byId.has(factoryId)) {
+        if (factoryId && !byId.has(factoryId) && !BLOCKED_CODES.has(cleanCode(factoryId))) {
           byId.set(factoryId, { id: factoryId, code: factoryId.toUpperCase(), name: factoryId });
         }
       });
@@ -107,8 +151,9 @@
     allFactories().forEach((factory) => {
       const staffRows = readJson(scopedKey(DB_KEYS.staff, factory.id), []);
       const workerRows = readJson(scopedKey(DB_KEYS.workers, factory.id), []);
-      const staff = Array.isArray(staffRows) ? staffRows : [];
-      const workers = Array.isArray(workerRows) ? workerRows : [];
+      if (isBlockedFactory(factory)) return;
+      const staff = Array.isArray(staffRows) ? staffRows.filter((member) => !isBlockedMember(member)) : [];
+      const workers = Array.isArray(workerRows) ? workerRows.filter((member) => !isBlockedMember(member)) : [];
 
       const found =
         factoryMatches(factory, query, type) ||
