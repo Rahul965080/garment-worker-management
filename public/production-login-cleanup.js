@@ -203,12 +203,12 @@
   function noteText() {
     const type = routeType();
     if (type === "staff") {
-      return "Production mode: staff apna assigned factory code, email/mobile aur password use karein. Demo access disabled hai.";
+      return "Production mode: staff apna assigned factory code, email/mobile aur password use karein. Sirf registered account allowed hai.";
     }
     if (type === "worker") {
-      return "Production mode: worker apna assigned factory code, worker ID/mobile aur password use karein. Demo access disabled hai.";
+      return "Production mode: worker apna assigned factory code, worker ID/mobile aur password use karein. Sirf registered account allowed hai.";
     }
-    return "Production mode: registered factory code, admin email aur password use karein. Demo access disabled hai.";
+    return "Production mode: registered factory code, admin email aur password use karein. Sirf registered account allowed hai.";
   }
 
   function ensureNotice(card) {
@@ -232,7 +232,7 @@
       if (form) form.insertAdjacentElement("afterend", error);
       else card.appendChild(error);
     }
-    error.textContent = "Demo login public use ke liye disabled hai. Registered factory account ya assigned credentials use karein.";
+    error.textContent = "Public access ke liye sirf registered factory account ya assigned credentials use karein.";
   }
 
   function cardHasDemoValue(card) {
