@@ -746,6 +746,7 @@
   }
 
   function render() {
+    if (window.__superAdminAdvancedActive) return;
     if (!isSuperRoute()) {
       injectHomeLink();
       return;
@@ -953,6 +954,7 @@
   });
 
   function renderWhenIdle() {
+    if (window.__superAdminAdvancedActive) return;
     if (!isSuperRoute()) {
       injectHomeLink();
       return;
