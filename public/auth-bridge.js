@@ -17,12 +17,26 @@
 
   function formMode(form) {
     if (form.querySelector('[name="factoryName"]')) return "create";
-    if (form.querySelector('[name="mobile"]') && form.querySelector('[name="password"]')) return "forgot";
+    const text = String(form.textContent || "").toLowerCase();
+    const hasPassword = !!form.querySelector('input[type="password"], [name="password"], [name="newPassword"], [name="confirmPassword"]');
+    const hasMobile = !!form.querySelector('[name="mobile"], [name="phone"], [name="adminMobile"], [name="ownerMobile"]');
+    const hasOtp = !!form.querySelector('[name="otp"]');
+    if (hasOtp || (hasPassword && hasMobile)) return "forgot";
+    if (!form.closest(".login-card") && hasPassword && /forgot|reset|new password|set password|password change/.test(text)) return "forgot";
     return "login";
   }
 
   function value(form, name) {
     return String(form.querySelector(`[name="${name}"]`)?.value || "").trim();
+  }
+
+  function passwordValue(form) {
+    return String(
+      form.querySelector('[name="password"]')?.value ||
+        form.querySelector('[name="newPassword"]')?.value ||
+        form.querySelector('[name="confirmPassword"]')?.value ||
+        "",
+    ).trim();
   }
 
   function showError(form, message) {
@@ -126,7 +140,7 @@
       body: JSON.stringify({
         resetId: form.dataset.resetId,
         otp: value(form, "otp"),
-        password: value(form, "password"),
+        password: passwordValue(form),
       }),
     });
     const result = await response.json().catch(() => ({ ok: false, error: "OTP verify failed" }));
@@ -150,6 +164,12 @@
       if (!role) return;
       const mode = formMode(form);
       if (mode === "forgot") {
+        if (!form.closest(".login-card")) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          showError(form, "Password reset ke liye login page ka Forgot Password OTP flow use karo.");
+          return;
+        }
         event.preventDefault();
         event.stopImmediatePropagation();
         handleForgotPassword(form, role).catch((error) => showError(form, error.message || "OTP reset failed"));
