@@ -665,6 +665,37 @@ function userIdentity(user) {
   return String(user?.id || user?.workerId || user?.email || user?.mobile || "").trim();
 }
 
+function isPasswordTableKey(key) {
+  return /^garmentworks_db_(staff|workers)(_|$)/.test(String(key || ""));
+}
+
+function hasExistingPasswordMutation(existingData, incomingData) {
+  for (const [key, value] of Object.entries(incomingData || {})) {
+    if (!isPasswordTableKey(key)) continue;
+
+    const oldValue = parseJsonValue(existingData[key], []);
+    const newValue = parseJsonValue(value, []);
+    const oldRows = Array.isArray(oldValue) ? oldValue : oldValue && typeof oldValue === "object" ? [oldValue] : [];
+    const newRows = Array.isArray(newValue) ? newValue : newValue && typeof newValue === "object" ? [newValue] : [];
+
+    const oldByIdentity = new Map();
+    oldRows.forEach((row) => {
+      const identity = userIdentity(row);
+      if (identity) oldByIdentity.set(identity, row);
+    });
+
+    for (const row of newRows) {
+      const identity = userIdentity(row);
+      if (!identity || !oldByIdentity.has(identity)) continue;
+      const oldRow = oldByIdentity.get(identity);
+      if (String(oldRow?.password || "") !== String(row?.password || "")) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 async function storeOtp(record) {
   const pool = await getPostgresPool();
   if (pool) {
@@ -958,6 +989,14 @@ async function handleDatabaseApi(request, response) {
       const body = await readJsonBody(request);
       const incomingData = body && typeof body.data === "object" && !Array.isArray(body.data) ? body.data : {};
       const removedKeys = Array.isArray(body?.removed) ? body.removed : [];
+      const current = await readDatabase();
+      if (hasExistingPasswordMutation(current.data || {}, incomingData)) {
+        sendJson(response, 403, {
+          ok: false,
+          error: "Password change sirf OTP verification ke baad allowed hai.",
+        });
+        return true;
+      }
       const saved = await syncDatabase(incomingData, removedKeys);
       sendJson(response, 200, {
         ok: true,
