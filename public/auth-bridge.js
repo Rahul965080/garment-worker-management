@@ -35,6 +35,16 @@
     box.textContent = message;
   }
 
+  function showSuccess(form, message) {
+    let box = form.querySelector(".server-auth-success, .login-success");
+    if (!box) {
+      box = document.createElement("div");
+      box.className = "server-auth-success login-success";
+      form.appendChild(box);
+    }
+    box.textContent = message;
+  }
+
   function writeSnapshot(data) {
     Object.entries(data || {}).forEach(([key, storedValue]) => {
       if (key.startsWith("garmentworks_")) nativeSetItem.call(window.localStorage, key, String(storedValue));
@@ -72,13 +82,80 @@
     window.location.reload();
   }
 
+  function ensureOtpField(form) {
+    let input = form.querySelector('[name="otp"]');
+    if (input) return input;
+
+    const wrap = document.createElement("label");
+    wrap.className = "form-field otp-field";
+    wrap.innerHTML = `<span>OTP Code</span><input name="otp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6 digit OTP" required>`;
+    const button = form.querySelector('button[type="submit"], button');
+    form.insertBefore(wrap, button || null);
+    return wrap.querySelector("input");
+  }
+
+  async function requestOtp(form, role) {
+    const payload = {
+      role,
+      factoryCode: value(form, "factoryCode"),
+      email: value(form, "email"),
+      workerId: value(form, "workerId"),
+      mobile: value(form, "mobile"),
+    };
+    const response = await fetch("/api/auth/password-reset/request", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify(payload),
+    });
+    const result = await response.json().catch(() => ({ ok: false, error: "OTP request failed" }));
+    if (!response.ok || !result.ok) throw new Error(result.error || "OTP request failed");
+    form.dataset.resetId = result.resetId;
+    ensureOtpField(form).focus();
+    const button = form.querySelector('button[type="submit"], button');
+    if (button) button.textContent = "Verify OTP & Change Password";
+    showSuccess(form, `${result.message || "OTP send ho gaya."} Contact: ${result.contact || "***"}`);
+    if (result.debugOtp) showSuccess(form, `Testing OTP: ${result.debugOtp}`);
+  }
+
+  async function verifyOtpAndChangePassword(form) {
+    const response = await fetch("/api/auth/password-reset/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({
+        resetId: form.dataset.resetId,
+        otp: value(form, "otp"),
+        password: value(form, "password"),
+      }),
+    });
+    const result = await response.json().catch(() => ({ ok: false, error: "OTP verify failed" }));
+    if (!response.ok || !result.ok) throw new Error(result.error || "OTP verify failed");
+    showSuccess(form, result.message || "Password change ho gaya. Ab login karo.");
+    form.dataset.resetId = "";
+    if (window.__garmentworksDb?.flush) await window.__garmentworksDb.flush();
+  }
+
+  function handleForgotPassword(form, role) {
+    if (form.dataset.resetId) return verifyOtpAndChangePassword(form);
+    return requestOtp(form, role);
+  }
+
   document.addEventListener(
     "submit",
     (event) => {
       const form = event.target;
       if (!(form instanceof HTMLFormElement) || !form.closest(".login-card")) return;
       const role = routeRole();
-      if (!role || formMode(form) !== "login") return;
+      if (!role) return;
+      const mode = formMode(form);
+      if (mode === "forgot") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        handleForgotPassword(form, role).catch((error) => showError(form, error.message || "OTP reset failed"));
+        return;
+      }
+      if (mode !== "login") return;
       event.preventDefault();
       event.stopImmediatePropagation();
       serverLogin(form, role).catch((error) => showError(form, error.message || "Login failed"));
