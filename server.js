@@ -1,5 +1,6 @@
 import { createReadStream, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -17,6 +18,9 @@ const rateLimitWindowMs = Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000);
 const apiRateLimitMax = Number(process.env.API_RATE_LIMIT_MAX || 180);
 const syncRateLimitMax = Number(process.env.SYNC_RATE_LIMIT_MAX || 60);
 const rateLimitBuckets = new Map();
+const sessionCookieName = "gw_session";
+const sessionMaxAgeSeconds = Number(process.env.SESSION_MAX_AGE_SECONDS || 12 * 60 * 60);
+const sessionSecret = process.env.APP_SESSION_SECRET || process.env.SESSION_SECRET || postgresConnectionString || "garmentworks-local-session-secret";
 
 const mimeTypes = {
   ".css": "text/css; charset=utf-8",
@@ -51,6 +55,74 @@ function securityHeaders(contentType) {
     "X-Frame-Options": "DENY",
     "X-Robots-Tag": "noindex, nofollow",
   };
+}
+
+function base64UrlEncode(value) {
+  return Buffer.from(value).toString("base64url");
+}
+
+function base64UrlDecode(value) {
+  return Buffer.from(value, "base64url").toString("utf8");
+}
+
+function signPayload(payload) {
+  return createHmac("sha256", sessionSecret).update(payload).digest("base64url");
+}
+
+function createSessionToken(session) {
+  const payload = base64UrlEncode(JSON.stringify({
+    ...session,
+    nonce: randomBytes(10).toString("hex"),
+    exp: Math.floor(Date.now() / 1000) + sessionMaxAgeSeconds,
+  }));
+  return `${payload}.${signPayload(payload)}`;
+}
+
+function verifySessionToken(token) {
+  if (!token || !token.includes(".")) return null;
+  const [payload, signature] = token.split(".");
+  const expected = signPayload(payload);
+  const actualBuffer = Buffer.from(signature || "");
+  const expectedBuffer = Buffer.from(expected);
+  if (actualBuffer.length !== expectedBuffer.length || !timingSafeEqual(actualBuffer, expectedBuffer)) return null;
+
+  try {
+    const session = JSON.parse(base64UrlDecode(payload));
+    if (!session.exp || Number(session.exp) < Math.floor(Date.now() / 1000)) return null;
+    return session;
+  } catch {
+    return null;
+  }
+}
+
+function parseCookies(request) {
+  const header = request.headers.cookie || "";
+  return Object.fromEntries(
+    header
+      .split(";")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const index = part.indexOf("=");
+        if (index === -1) return [part, ""];
+        return [part.slice(0, index), decodeURIComponent(part.slice(index + 1))];
+      }),
+  );
+}
+
+function sessionFromRequest(request) {
+  return verifySessionToken(parseCookies(request)[sessionCookieName]);
+}
+
+function setSessionCookie(response, token) {
+  response.setHeader(
+    "Set-Cookie",
+    `${sessionCookieName}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${sessionMaxAgeSeconds}; Secure`,
+  );
+}
+
+function clearSessionCookie(response) {
+  response.setHeader("Set-Cookie", `${sessionCookieName}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0; Secure`);
 }
 
 function getClientIp(request) {
@@ -279,6 +351,144 @@ async function readDatabase() {
   };
 }
 
+function parseJsonValue(value, fallback) {
+  try {
+    return value ? JSON.parse(value) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function cleanCode(value) {
+  return String(value || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 32);
+}
+
+function lower(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function digits(value) {
+  return String(value || "").replace(/\D/g, "");
+}
+
+function scopedKey(baseKey, factoryId) {
+  const id = String(factoryId || "").trim();
+  return !id || id === "demo" ? baseKey : `${baseKey}_${id}`;
+}
+
+function factoriesFromData(data) {
+  const rows = parseJsonValue(data.garmentworks_factories, []);
+  return Array.isArray(rows) ? rows.filter(Boolean) : [];
+}
+
+function normalizeFactory(row) {
+  if (!row || typeof row !== "object") return null;
+  const id = String(row.id || row.factoryId || row.code || row.factoryCode || "").trim();
+  const code = String(row.code || row.factoryCode || row.id || "").trim();
+  const name = String(row.name || row.factoryName || row.companyName || "").trim();
+  if (!id && !code) return null;
+  return { ...row, id: id || code, code: code || id, name };
+}
+
+function findFactoryForLogin(data, value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const code = cleanCode(raw);
+  const text = lower(raw);
+  return (
+    factoriesFromData(data)
+      .map(normalizeFactory)
+      .filter(Boolean)
+      .find((factory) => (
+        cleanCode(factory.code) === code ||
+        cleanCode(factory.id) === code ||
+        lower(factory.name) === text ||
+        lower(factory.factoryName) === text ||
+        lower(factory.companyName) === text
+      )) || null
+  );
+}
+
+function rowsForFactory(data, baseKey, factory) {
+  const ids = [factory?.id, factory?.code, factory?.factoryId, factory?.factoryCode].filter(Boolean);
+  for (const id of ids) {
+    const rows = parseJsonValue(data[scopedKey(baseKey, id)], null);
+    if (Array.isArray(rows)) return rows;
+  }
+  const fallback = parseJsonValue(data[baseKey], []);
+  return Array.isArray(fallback) ? fallback : [];
+}
+
+function isActive(row) {
+  return String(row?.status || "Active").toLowerCase() === "active";
+}
+
+function tenantSnapshot(data, factory) {
+  const allowed = {};
+  if (data.garmentworks_factories) allowed.garmentworks_factories = data.garmentworks_factories;
+  const ids = [...new Set([factory?.id, factory?.code, factory?.factoryId, factory?.factoryCode].filter(Boolean).map(String))];
+  const always = [
+    "garmentworks_active_factory",
+    "garmentworks_admin_session",
+    "garmentworks_staff_session",
+    "garmentworks_worker_session",
+  ];
+  for (const key of always) {
+    if (data[key] !== undefined) allowed[key] = data[key];
+  }
+
+  for (const [key, value] of Object.entries(data)) {
+    if (!isDatabaseKey(key)) continue;
+    if (ids.some((id) => key.endsWith(`_${id}`))) allowed[key] = value;
+  }
+  return allowed;
+}
+
+async function authenticateLogin(body) {
+  const role = lower(body.role || body.portal || "");
+  if (!["admin", "staff", "worker"].includes(role)) return { ok: false, error: "Invalid login portal" };
+
+  const snapshot = await readDatabase();
+  const data = snapshot.data || {};
+  const factory = findFactoryForLogin(data, body.factoryCode || body.factory || body.factoryName);
+  if (!factory) return { ok: false, error: "Factory code/name match nahi hua" };
+
+  const password = String(body.password || "").trim();
+  if (password.length < 4) return { ok: false, error: "Password kam se kam 4 character ka hona chahiye" };
+
+  let user = null;
+  if (role === "admin" || role === "staff") {
+    const email = lower(body.email);
+    const staff = rowsForFactory(data, "garmentworks_db_staff", factory);
+    user = staff.find((row) => lower(row.email) === email);
+    if (!user || String(user.password || "") !== password) return { ok: false, error: "Factory, email ya password match nahi hua" };
+    const isAdmin = lower(user.role) === "admin";
+    if (role === "admin" && !isAdmin) return { ok: false, error: "Is account ko admin access allowed nahi hai" };
+    if (role === "staff" && isAdmin) return { ok: false, error: "Admin account staff portal par allowed nahi hai" };
+  } else {
+    const workerId = lower(body.workerId);
+    const mobile = digits(body.mobile);
+    const workers = rowsForFactory(data, "garmentworks_db_workers", factory);
+    user = workers.find((row) => lower(row.workerId) === workerId || (!!mobile && digits(row.mobile) === mobile));
+    if (!user || String(user.password || "").trim() !== password) return { ok: false, error: "Factory, worker ID/mobile ya password match nahi hua" };
+  }
+
+  if (!isActive(user)) return { ok: false, error: "Account suspended/inactive hai" };
+
+  const session = {
+    role,
+    id: user.id || user.workerId || user.email || "",
+    email: user.email || "",
+    workerId: user.workerId || "",
+    mobile: user.mobile || "",
+    name: user.name || "",
+    factoryId: factory.id,
+    factoryCode: factory.code,
+    loginAt: Date.now(),
+  };
+  return { ok: true, session, data: tenantSnapshot(data, factory) };
+}
+
 async function syncDatabase(incomingData, removedKeys) {
   const pool = await getPostgresPool();
   if (pool) {
@@ -352,6 +562,38 @@ async function handleDatabaseApi(request, response) {
       uptimeSeconds: Math.round(process.uptime()),
       timestamp: new Date().toISOString(),
     });
+    return true;
+  }
+
+  if (parsed.pathname === "/api/auth/session" && request.method === "GET") {
+    const session = sessionFromRequest(request);
+    sendJson(response, session ? 200 : 401, { ok: Boolean(session), session: session || null });
+    return true;
+  }
+
+  if (parsed.pathname === "/api/auth/logout" && request.method === "POST") {
+    clearSessionCookie(response);
+    sendJson(response, 200, { ok: true });
+    return true;
+  }
+
+  if (parsed.pathname === "/api/auth/login" && request.method === "POST") {
+    try {
+      if (!isAllowedOrigin(request)) {
+        sendJson(response, 403, { ok: false, error: "Request origin is not allowed" });
+        return true;
+      }
+      const body = await readJsonBody(request);
+      const result = await authenticateLogin(body);
+      if (!result.ok) {
+        sendJson(response, 401, result);
+        return true;
+      }
+      setSessionCookie(response, createSessionToken(result.session));
+      sendJson(response, 200, result);
+    } catch (error) {
+      sendJson(response, 400, { ok: false, error: error.message || "Login failed" });
+    }
     return true;
   }
 
