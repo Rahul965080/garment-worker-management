@@ -19,6 +19,67 @@
     return typeof key === "string" && key.startsWith(KEY_PREFIX);
   }
 
+  function isPasswordTableKey(key) {
+    return /^garmentworks_db_(staff|workers)(_|$)/.test(String(key || ""));
+  }
+
+  function parseRows(value) {
+    try {
+      const parsed = value ? JSON.parse(value) : [];
+      if (Array.isArray(parsed)) return parsed;
+      if (parsed && typeof parsed === "object") return [parsed];
+      return [];
+    } catch {
+      return [];
+    }
+  }
+
+  function userIdentity(row) {
+    return String(row?.id || row?.workerId || row?.email || row?.mobile || "").trim();
+  }
+
+  function hasExistingPasswordMutation(key, nextValue) {
+    if (!isPasswordTableKey(key)) return false;
+    const oldRows = parseRows(nativeStorage.getItem.call(window.localStorage, key));
+    const newRows = parseRows(nextValue);
+    const oldByIdentity = new Map();
+
+    oldRows.forEach((row) => {
+      const identity = userIdentity(row);
+      if (identity) oldByIdentity.set(identity, row);
+    });
+
+    return newRows.some((row) => {
+      const identity = userIdentity(row);
+      if (!identity || !oldByIdentity.has(identity)) return false;
+      const oldRow = oldByIdentity.get(identity);
+      return String(oldRow?.password || "") !== String(row?.password || "");
+    });
+  }
+
+  function showPasswordGuardNotice() {
+    window.__garmentworksDbStatus = {
+      ok: false,
+      error: "Password change sirf OTP verify hone ke baad allowed hai.",
+    };
+    window.dispatchEvent(new CustomEvent("garmentworks-password-change-blocked"));
+
+    try {
+      let notice = document.getElementById("garmentworks-password-guard-notice");
+      if (!notice) {
+        notice = document.createElement("div");
+        notice.id = "garmentworks-password-guard-notice";
+        notice.style.cssText = "position:fixed;right:18px;bottom:18px;z-index:99999;max-width:360px;padding:14px 16px;border-radius:10px;background:#fee2e2;color:#991b1b;font:800 14px system-ui,sans-serif;box-shadow:0 18px 35px rgba(15,23,42,.18)";
+        document.body.appendChild(notice);
+      }
+      notice.textContent = "Password change blocked. Forgot Password OTP verify karke hi password change hoga.";
+      window.clearTimeout(notice._timer);
+      notice._timer = window.setTimeout(() => notice.remove(), 5000);
+    } catch {
+      window.alert("Password change blocked. OTP verify karke hi password change hoga.");
+    }
+  }
+
   function getLocalSnapshot() {
     const data = {};
     try {
@@ -153,6 +214,10 @@
   }
 
   Storage.prototype.setItem = function (key, value) {
+    if (this === window.localStorage && hasExistingPasswordMutation(key, value)) {
+      showPasswordGuardNotice();
+      return undefined;
+    }
     const result = nativeStorage.setItem.call(this, key, value);
     if (this === window.localStorage) queueSet(key, value);
     return result;
