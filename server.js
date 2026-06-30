@@ -105,6 +105,37 @@ function verifySessionToken(token) {
   }
 }
 
+function createPasswordResetToken(record) {
+  const payload = base64UrlEncode(JSON.stringify({
+    purpose: "password-reset",
+    resetId: record.reset_id || record.resetId,
+    role: record.role,
+    factoryId: record.factory_id || record.factoryId,
+    userId: record.user_id || record.userId,
+    nonce: randomBytes(10).toString("hex"),
+    exp: Math.floor(Date.now() / 1000) + 10 * 60,
+  }));
+  return `${payload}.${signPayload(payload)}`;
+}
+
+function verifyPasswordResetToken(token) {
+  if (!token || !token.includes(".")) return null;
+  const [payload, signature] = token.split(".");
+  const expected = signPayload(payload);
+  const actualBuffer = Buffer.from(signature || "");
+  const expectedBuffer = Buffer.from(expected);
+  if (actualBuffer.length !== expectedBuffer.length || !timingSafeEqual(actualBuffer, expectedBuffer)) return null;
+
+  try {
+    const parsed = JSON.parse(base64UrlDecode(payload));
+    if (parsed.purpose !== "password-reset") return null;
+    if (!parsed.exp || Number(parsed.exp) < Math.floor(Date.now() / 1000)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 function parseCookies(request) {
   const header = request.headers.cookie || "";
   return Object.fromEntries(
@@ -816,6 +847,60 @@ async function verifyPasswordReset(body) {
   };
 }
 
+async function verifyPasswordResetOtpOnly(body) {
+  const resetId = String(body.resetId || "").trim();
+  const otp = String(body.otp || "").trim();
+  if (!resetId || !otp) return { ok: false, error: "OTP required hai" };
+
+  const record = await loadOtp(resetId);
+  if (!record) return { ok: false, error: "OTP invalid ya expire ho gaya" };
+  const attempts = Number(record.attempts || 0);
+  if (attempts >= otpMaxAttempts) return { ok: false, error: "OTP attempts limit cross ho gayi. New OTP request karo." };
+  const expiresAt = new Date(record.expires_at || record.expiresAt).getTime();
+  if (!expiresAt || Date.now() > expiresAt) return { ok: false, error: "OTP expire ho gaya. New OTP request karo." };
+  const expectedHash = record.otp_hash || record.otpHash;
+  if (otpHash(resetId, otp) !== expectedHash) {
+    await markOtpAttempt(resetId, false);
+    return { ok: false, error: "OTP match nahi hua" };
+  }
+
+  await markOtpAttempt(resetId, true);
+  return {
+    ok: true,
+    resetToken: createPasswordResetToken(record),
+    message: "OTP verify ho gaya. Ab naya password set karo.",
+  };
+}
+
+async function changePasswordWithResetToken(body) {
+  const token = verifyPasswordResetToken(String(body.resetToken || ""));
+  const newPassword = String(body.password || body.newPassword || "").trim();
+  if (!token) return { ok: false, error: "Password reset token invalid ya expire ho gaya. New OTP request karo." };
+  if (newPassword.length < 4) return { ok: false, error: "New password kam se kam 4 character ka hona chahiye" };
+
+  const snapshot = await readDatabase();
+  const data = snapshot.data || {};
+  const factory = findFactoryForLogin(data, token.factoryId);
+  if (!factory) return { ok: false, error: "Factory record nahi mila" };
+  const baseKey = token.role === "worker" ? "garmentworks_db_workers" : "garmentworks_db_staff";
+  const dataKey = dataKeyForFactory(data, baseKey, factory);
+  const rows = parseJsonValue(data[dataKey], []);
+  const nextRows = (Array.isArray(rows) ? rows : []).map((row) => {
+    if (String(userIdentity(row)) === String(token.userId || "")) return { ...row, password: newPassword };
+    return row;
+  });
+  const changed = JSON.stringify(rows) !== JSON.stringify(nextRows);
+  if (!changed) return { ok: false, error: "User record nahi mila" };
+
+  const saved = await syncDatabase({ [dataKey]: JSON.stringify(nextRows) }, []);
+  return {
+    ok: true,
+    storage: saved.storage,
+    updatedAt: saved.updatedAt,
+    message: "Password change ho gaya. Ab new password se login karo.",
+  };
+}
+
 async function syncDatabase(incomingData, removedKeys) {
   const pool = await getPostgresPool();
   if (pool) {
@@ -951,6 +1036,36 @@ async function handleDatabaseApi(request, response) {
       sendJson(response, result.ok ? 200 : 401, result);
     } catch (error) {
       sendJson(response, 400, { ok: false, error: error.message || "OTP verify failed" });
+    }
+    return true;
+  }
+
+  if (parsed.pathname === "/api/auth/password-reset/verify-otp" && request.method === "POST") {
+    try {
+      if (!isAllowedOrigin(request)) {
+        sendJson(response, 403, { ok: false, error: "Request origin is not allowed" });
+        return true;
+      }
+      const body = await readJsonBody(request);
+      const result = await verifyPasswordResetOtpOnly(body);
+      sendJson(response, result.ok ? 200 : 401, result);
+    } catch (error) {
+      sendJson(response, 400, { ok: false, error: error.message || "OTP verify failed" });
+    }
+    return true;
+  }
+
+  if (parsed.pathname === "/api/auth/password-reset/change" && request.method === "POST") {
+    try {
+      if (!isAllowedOrigin(request)) {
+        sendJson(response, 403, { ok: false, error: "Request origin is not allowed" });
+        return true;
+      }
+      const body = await readJsonBody(request);
+      const result = await changePasswordWithResetToken(body);
+      sendJson(response, result.ok ? 200 : 401, result);
+    } catch (error) {
+      sendJson(response, 400, { ok: false, error: error.message || "Password change failed" });
     }
     return true;
   }
