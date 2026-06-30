@@ -10,6 +10,9 @@ const dataRoot = resolve(process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUN
 const databaseFile = join(dataRoot, "garmentworks-db.json");
 const databaseKeyPrefix = "garmentworks_";
 const maxJsonBodyBytes = 25 * 1024 * 1024;
+const postgresConnectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL || "";
+let postgresPoolPromise = null;
+let postgresUnavailableReason = "";
 
 const mimeTypes = {
   ".css": "text/css; charset=utf-8",
@@ -32,7 +35,7 @@ function ensureDataRoot() {
   mkdirSync(dataRoot, { recursive: true });
 }
 
-function readDatabase() {
+function readJsonDatabase() {
   ensureDataRoot();
   if (!existsSync(databaseFile)) {
     return { updatedAt: null, data: {} };
@@ -50,13 +53,165 @@ function readDatabase() {
   }
 }
 
-function writeDatabase(data) {
+function writeJsonDatabase(data) {
   ensureDataRoot();
   const payload = { updatedAt: new Date().toISOString(), data };
   const tempFile = `${databaseFile}.tmp`;
   writeFileSync(tempFile, JSON.stringify(payload, null, 2), "utf8");
   renameSync(tempFile, databaseFile);
   return payload;
+}
+
+function hasPostgresConfig() {
+  return Boolean(postgresConnectionString || (process.env.PGHOST && process.env.PGDATABASE && process.env.PGUSER));
+}
+
+async function getPostgresPool() {
+  if (!hasPostgresConfig()) return null;
+  if (!postgresPoolPromise) {
+    postgresPoolPromise = (async () => {
+      try {
+        const { Pool } = await import("pg");
+        const pool = postgresConnectionString
+          ? new Pool({
+              connectionString: postgresConnectionString,
+              ssl: process.env.PGSSLMODE === "require" ? { rejectUnauthorized: false } : undefined,
+            })
+          : new Pool({
+              host: process.env.PGHOST,
+              port: process.env.PGPORT ? Number(process.env.PGPORT) : undefined,
+              database: process.env.PGDATABASE,
+              user: process.env.PGUSER,
+              password: process.env.PGPASSWORD,
+              ssl: process.env.PGSSLMODE === "require" ? { rejectUnauthorized: false } : undefined,
+            });
+
+        await pool.query(`
+          CREATE TABLE IF NOT EXISTS garmentworks_kv (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          )
+        `);
+        await migrateJsonDatabaseToPostgres(pool);
+        postgresUnavailableReason = "";
+        return pool;
+      } catch (error) {
+        postgresUnavailableReason = error.message || "Postgres unavailable";
+        console.error("Postgres unavailable, using JSON fallback:", error);
+        return null;
+      }
+    })();
+  }
+  return postgresPoolPromise;
+}
+
+async function migrateJsonDatabaseToPostgres(pool) {
+  if (!existsSync(databaseFile)) return;
+
+  const countResult = await pool.query("SELECT COUNT(*)::int AS count FROM garmentworks_kv");
+  if (Number(countResult.rows[0]?.count || 0) > 0) return;
+
+  const snapshot = readJsonDatabase();
+  const entries = Object.entries(snapshot.data).filter(([key]) => isDatabaseKey(key));
+  if (!entries.length) return;
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    for (const [key, value] of entries) {
+      await client.query(
+        `INSERT INTO garmentworks_kv (key, value, updated_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+        [key, String(value)],
+      );
+    }
+    await client.query("COMMIT");
+    console.log(`Migrated ${entries.length} GarmentWorks keys from JSON file to Postgres`);
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function readPostgresDatabase(pool) {
+  const result = await pool.query(
+    "SELECT key, value, updated_at FROM garmentworks_kv WHERE key LIKE $1 ORDER BY key ASC",
+    [`${databaseKeyPrefix}%`],
+  );
+  const data = {};
+  let updatedAt = null;
+  for (const row of result.rows) {
+    data[row.key] = row.value;
+    const rowUpdatedAt = row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at || "");
+    if (!updatedAt || rowUpdatedAt > updatedAt) updatedAt = rowUpdatedAt;
+  }
+  return { updatedAt, data };
+}
+
+async function syncPostgresDatabase(pool, incomingData, removedKeys) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    for (const [key, value] of Object.entries(incomingData)) {
+      if (!isDatabaseKey(key)) continue;
+      await client.query(
+        `INSERT INTO garmentworks_kv (key, value, updated_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+        [key, String(value)],
+      );
+    }
+    for (const key of removedKeys) {
+      if (isDatabaseKey(key)) await client.query("DELETE FROM garmentworks_kv WHERE key = $1", [key]);
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  return readPostgresDatabase(pool);
+}
+
+async function readDatabase() {
+  const pool = await getPostgresPool();
+  if (pool) {
+    return { storage: "postgres", ...(await readPostgresDatabase(pool)) };
+  }
+
+  const snapshot = readJsonDatabase();
+  return {
+    storage: process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR ? "persistent-json-file" : "local-json-file",
+    warning: hasPostgresConfig() ? postgresUnavailableReason : "DATABASE_URL not configured",
+    ...snapshot,
+  };
+}
+
+async function syncDatabase(incomingData, removedKeys) {
+  const pool = await getPostgresPool();
+  if (pool) {
+    return { storage: "postgres", ...(await syncPostgresDatabase(pool, incomingData, removedKeys)) };
+  }
+
+  const snapshot = readJsonDatabase();
+  const nextData = { ...snapshot.data };
+  for (const [key, value] of Object.entries(incomingData)) {
+    if (isDatabaseKey(key)) nextData[key] = String(value);
+  }
+  for (const key of removedKeys) {
+    if (isDatabaseKey(key)) delete nextData[key];
+  }
+  return {
+    storage: process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR ? "persistent-json-file" : "local-json-file",
+    warning: hasPostgresConfig() ? postgresUnavailableReason : "DATABASE_URL not configured",
+    ...writeJsonDatabase(nextData),
+  };
 }
 
 function isDatabaseKey(key) {
@@ -103,10 +258,11 @@ async function handleDatabaseApi(request, response) {
   const parsed = new URL(request.url || "/", "http://localhost");
 
   if (request.method === "GET" && parsed.pathname === "/api/db/snapshot") {
-    const snapshot = readDatabase();
+    const snapshot = await readDatabase();
     sendJson(response, 200, {
       ok: true,
-      storage: process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DATA_DIR ? "persistent-json-file" : "local-json-file",
+      storage: snapshot.storage,
+      warning: snapshot.warning,
       updatedAt: snapshot.updatedAt,
       data: snapshot.data,
     });
@@ -116,22 +272,13 @@ async function handleDatabaseApi(request, response) {
   if (request.method === "POST" && parsed.pathname === "/api/db/sync") {
     try {
       const body = await readJsonBody(request);
-      const snapshot = readDatabase();
-      const nextData = { ...snapshot.data };
       const incomingData = body && typeof body.data === "object" && !Array.isArray(body.data) ? body.data : {};
       const removedKeys = Array.isArray(body?.removed) ? body.removed : [];
-
-      for (const [key, value] of Object.entries(incomingData)) {
-        if (isDatabaseKey(key)) nextData[key] = String(value);
-      }
-
-      for (const key of removedKeys) {
-        if (isDatabaseKey(key)) delete nextData[key];
-      }
-
-      const saved = writeDatabase(nextData);
+      const saved = await syncDatabase(incomingData, removedKeys);
       sendJson(response, 200, {
         ok: true,
+        storage: saved.storage,
+        warning: saved.warning,
         updatedAt: saved.updatedAt,
         keys: Object.keys(saved.data).length,
       });
