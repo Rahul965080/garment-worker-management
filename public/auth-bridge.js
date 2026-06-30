@@ -67,15 +67,20 @@
     passwordInputs(form).forEach((input) => {
       const wrap = input.closest("label, .field, .form-field") || input;
       if (form.dataset.resetToken || visible) {
-        input.disabled = false;
-        input.required = true;
-        wrap.style.display = "";
+        if (input.disabled) input.disabled = false;
+        if (!input.required) input.required = true;
+        if (wrap.style.display) wrap.style.display = "";
       } else {
-        input.disabled = true;
-        input.required = false;
-        wrap.style.display = "none";
+        if (!input.disabled) input.disabled = true;
+        if (input.required) input.required = false;
+        if (wrap.style.display !== "none") wrap.style.display = "none";
       }
     });
+  }
+
+  function setButtonText(form, text) {
+    const button = form.querySelector('button[type="submit"], button');
+    if (button && String(button.textContent || "").trim() !== text) button.textContent = text;
   }
 
   function writeSnapshot(data) {
@@ -147,8 +152,7 @@
     form.dataset.resetId = result.resetId;
     form.dataset.resetToken = "";
     ensureOtpField(form).focus();
-    const button = form.querySelector('button[type="submit"], button');
-    if (button) button.textContent = "Verify OTP";
+    setButtonText(form, "Verify OTP");
     showSuccess(form, `${result.message || "OTP send ho gaya."} Contact: ${result.contact || "***"}`);
     if (result.debugOtp) showSuccess(form, `Testing OTP: ${result.debugOtp}`);
   }
@@ -167,8 +171,7 @@
     if (!response.ok || !result.ok) throw new Error(result.error || "OTP verify failed");
     form.dataset.resetToken = result.resetToken;
     setPasswordInputsVisible(form, true);
-    const button = form.querySelector('button[type="submit"], button');
-    if (button) button.textContent = "Change Password";
+    setButtonText(form, "Change Password");
     showSuccess(form, result.message || "OTP verify ho gaya. Ab naya password set karo.");
   }
 
@@ -201,8 +204,7 @@
       if (!(form instanceof HTMLFormElement)) return;
       if (formMode(form) !== "forgot") return;
       if (!form.dataset.resetToken) setPasswordInputsVisible(form, false);
-      const button = form.querySelector('button[type="submit"], button');
-      if (button && !form.dataset.resetId && !form.dataset.resetToken) button.textContent = "Send OTP";
+      if (!form.dataset.resetId && !form.dataset.resetToken) setButtonText(form, "Send OTP");
     });
   }
 
@@ -234,7 +236,17 @@
     true,
   );
 
+  let prepareQueued = false;
+  function schedulePrepareForgotForms() {
+    if (prepareQueued) return;
+    prepareQueued = true;
+    window.requestAnimationFrame(() => {
+      prepareQueued = false;
+      prepareForgotForms();
+    });
+  }
+
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", prepareForgotForms);
   else prepareForgotForms();
-  new MutationObserver(prepareForgotForms).observe(document.documentElement, { childList: true, subtree: true });
+  new MutationObserver(schedulePrepareForgotForms).observe(document.documentElement, { childList: true, subtree: true });
 })();
