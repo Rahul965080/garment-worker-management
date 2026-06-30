@@ -159,7 +159,16 @@
     true
   );
 
-  new MutationObserver(render).observe(document.documentElement, { childList: true, subtree: true });
-  setInterval(render, 1000);
+  let renderQueued = false;
+  function scheduleRender() {
+    if (renderQueued) return;
+    renderQueued = true;
+    window.requestAnimationFrame(() => {
+      renderQueued = false;
+      render();
+    });
+  }
+
+  new MutationObserver(scheduleRender).observe(document.documentElement, { childList: true, subtree: true });
   render();
 })();
