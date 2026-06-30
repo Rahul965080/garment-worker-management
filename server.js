@@ -21,6 +21,9 @@ const rateLimitBuckets = new Map();
 const sessionCookieName = "gw_session";
 const sessionMaxAgeSeconds = Number(process.env.SESSION_MAX_AGE_SECONDS || 12 * 60 * 60);
 const sessionSecret = process.env.APP_SESSION_SECRET || process.env.SESSION_SECRET || postgresConnectionString || "garmentworks-local-session-secret";
+const otpExpiryMinutes = Number(process.env.OTP_EXPIRY_MINUTES || 10);
+const otpMaxAttempts = Number(process.env.OTP_MAX_ATTEMPTS || 5);
+const memoryOtpStore = new Map();
 
 const mimeTypes = {
   ".css": "text/css; charset=utf-8",
@@ -250,7 +253,22 @@ async function getPostgresPool() {
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
           )
         `);
+        await pool.query(`
+          CREATE TABLE IF NOT EXISTS garmentworks_password_reset_otps (
+            reset_id TEXT PRIMARY KEY,
+            role TEXT NOT NULL,
+            factory_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            contact TEXT NOT NULL,
+            otp_hash TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            expires_at TIMESTAMPTZ NOT NULL,
+            used_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          )
+        `);
         await pool.query("CREATE INDEX IF NOT EXISTS garmentworks_kv_updated_at_idx ON garmentworks_kv (updated_at DESC)");
+        await pool.query("CREATE INDEX IF NOT EXISTS garmentworks_password_reset_otps_expires_at_idx ON garmentworks_password_reset_otps (expires_at)");
         await migrateJsonDatabaseToPostgres(pool);
         postgresUnavailableReason = "";
         return pool;
@@ -419,6 +437,16 @@ function rowsForFactory(data, baseKey, factory) {
   return Array.isArray(fallback) ? fallback : [];
 }
 
+function dataKeyForFactory(data, baseKey, factory) {
+  const ids = [factory?.id, factory?.code, factory?.factoryId, factory?.factoryCode].filter(Boolean);
+  for (const id of ids) {
+    const key = scopedKey(baseKey, id);
+    if (data[key] !== undefined) return key;
+  }
+  if (data[baseKey] !== undefined) return baseKey;
+  return ids.length ? scopedKey(baseKey, ids[0]) : baseKey;
+}
+
 function isActive(row) {
   return String(row?.status || "Active").toLowerCase() === "active";
 }
@@ -487,6 +515,190 @@ async function authenticateLogin(body) {
     loginAt: Date.now(),
   };
   return { ok: true, session, data: tenantSnapshot(data, factory) };
+}
+
+function findPasswordResetTarget(data, body) {
+  const role = lower(body.role || body.portal || "");
+  if (!["admin", "staff", "worker"].includes(role)) return { ok: false, error: "Invalid portal" };
+
+  const factory = findFactoryForLogin(data, body.factoryCode || body.factory || body.factoryName);
+  if (!factory) return { ok: false, error: "Factory code/name match nahi hua" };
+
+  if (role === "admin" || role === "staff") {
+    const email = lower(body.email);
+    const mobile = digits(body.mobile);
+    const staffKey = dataKeyForFactory(data, "garmentworks_db_staff", factory);
+    const staff = parseJsonValue(data[staffKey], []);
+    const user = (Array.isArray(staff) ? staff : []).find((row) => lower(row.email) === email && digits(row.mobile) === mobile);
+    if (!user) return { ok: false, error: "Email/mobile factory se match nahi hua" };
+    const isAdmin = lower(user.role) === "admin";
+    if (role === "admin" && !isAdmin) return { ok: false, error: "Is account ko admin reset allowed nahi hai" };
+    if (role === "staff" && isAdmin) return { ok: false, error: "Admin account staff reset me allowed nahi hai" };
+    if (!isActive(user)) return { ok: false, error: "Account suspended/inactive hai" };
+    return { ok: true, role, factory, baseKey: "garmentworks_db_staff", dataKey: staffKey, user, contact: user.email || user.mobile || mobile };
+  }
+
+  const workerId = lower(body.workerId);
+  const mobile = digits(body.mobile);
+  const workerKey = dataKeyForFactory(data, "garmentworks_db_workers", factory);
+  const workers = parseJsonValue(data[workerKey], []);
+  const user = (Array.isArray(workers) ? workers : []).find((row) => lower(row.workerId) === workerId && digits(row.mobile) === mobile);
+  if (!user) return { ok: false, error: "Worker ID/mobile factory se match nahi hua" };
+  if (!isActive(user)) return { ok: false, error: "Worker suspended/inactive hai" };
+  return { ok: true, role, factory, baseKey: "garmentworks_db_workers", dataKey: workerKey, user, contact: user.email || user.mobile || mobile };
+}
+
+function maskContact(contact) {
+  const raw = String(contact || "");
+  if (raw.includes("@")) {
+    const [name, domain] = raw.split("@");
+    return `${name.slice(0, 2)}***@${domain || "***"}`;
+  }
+  const onlyDigits = digits(raw);
+  if (onlyDigits.length >= 4) return `******${onlyDigits.slice(-4)}`;
+  return "***";
+}
+
+function createOtp() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+function otpHash(resetId, otp) {
+  return createHmac("sha256", sessionSecret).update(`${resetId}:${otp}`).digest("hex");
+}
+
+function userIdentity(user) {
+  return String(user?.id || user?.workerId || user?.email || user?.mobile || "").trim();
+}
+
+async function storeOtp(record) {
+  const pool = await getPostgresPool();
+  if (pool) {
+    await pool.query("DELETE FROM garmentworks_password_reset_otps WHERE expires_at < NOW() OR used_at IS NOT NULL");
+    await pool.query(
+      `INSERT INTO garmentworks_password_reset_otps
+       (reset_id, role, factory_id, user_id, contact, otp_hash, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [record.resetId, record.role, record.factoryId, record.userId, record.contact, record.otpHash, record.expiresAt],
+    );
+    return;
+  }
+  memoryOtpStore.set(record.resetId, { ...record, attempts: 0, usedAt: null });
+}
+
+async function loadOtp(resetId) {
+  const pool = await getPostgresPool();
+  if (pool) {
+    const result = await pool.query(
+      "SELECT * FROM garmentworks_password_reset_otps WHERE reset_id = $1 AND used_at IS NULL",
+      [resetId],
+    );
+    return result.rows[0] || null;
+  }
+  return memoryOtpStore.get(resetId) || null;
+}
+
+async function markOtpAttempt(resetId, used) {
+  const pool = await getPostgresPool();
+  if (pool) {
+    await pool.query(
+      `UPDATE garmentworks_password_reset_otps
+       SET attempts = attempts + 1, used_at = CASE WHEN $2 THEN NOW() ELSE used_at END
+       WHERE reset_id = $1`,
+      [resetId, used],
+    );
+    return;
+  }
+  const record = memoryOtpStore.get(resetId);
+  if (record) {
+    record.attempts = Number(record.attempts || 0) + 1;
+    if (used) record.usedAt = new Date().toISOString();
+  }
+}
+
+async function requestPasswordReset(body) {
+  const snapshot = await readDatabase();
+  const target = findPasswordResetTarget(snapshot.data || {}, body);
+  if (!target.ok) return target;
+
+  const resetId = randomBytes(16).toString("hex");
+  const otp = createOtp();
+  const expiresAt = new Date(Date.now() + otpExpiryMinutes * 60 * 1000).toISOString();
+  const record = {
+    resetId,
+    role: target.role,
+    factoryId: target.factory.id,
+    userId: userIdentity(target.user),
+    contact: String(target.contact || ""),
+    otpHash: otpHash(resetId, otp),
+    expiresAt,
+  };
+  await storeOtp(record);
+
+  console.log(JSON.stringify({
+    at: new Date().toISOString(),
+    event: "password_reset_otp",
+    resetId,
+    role: target.role,
+    factoryId: target.factory.id,
+    contact: maskContact(target.contact),
+    otp,
+    expiresAt,
+  }));
+
+  return {
+    ok: true,
+    resetId,
+    expiresAt,
+    contact: maskContact(target.contact),
+    delivery: process.env.OTP_DELIVERY_MODE || "railway-logs",
+    message: "OTP registered contact par send ho gaya. Delivery provider na ho to Railway logs me OTP milega.",
+    debugOtp: process.env.OTP_DEBUG_RESPONSE === "1" ? otp : undefined,
+  };
+}
+
+async function verifyPasswordReset(body) {
+  const resetId = String(body.resetId || "").trim();
+  const otp = String(body.otp || "").trim();
+  const newPassword = String(body.password || body.newPassword || "").trim();
+  if (!resetId || !otp) return { ok: false, error: "OTP required hai" };
+  if (newPassword.length < 4) return { ok: false, error: "New password kam se kam 4 character ka hona chahiye" };
+
+  const record = await loadOtp(resetId);
+  if (!record) return { ok: false, error: "OTP invalid ya expire ho gaya" };
+  const attempts = Number(record.attempts || 0);
+  if (attempts >= otpMaxAttempts) return { ok: false, error: "OTP attempts limit cross ho gayi. New OTP request karo." };
+  const expiresAt = new Date(record.expires_at || record.expiresAt).getTime();
+  if (!expiresAt || Date.now() > expiresAt) return { ok: false, error: "OTP expire ho gaya. New OTP request karo." };
+  const expectedHash = record.otp_hash || record.otpHash;
+  if (otpHash(resetId, otp) !== expectedHash) {
+    await markOtpAttempt(resetId, false);
+    return { ok: false, error: "OTP match nahi hua" };
+  }
+
+  const snapshot = await readDatabase();
+  const data = snapshot.data || {};
+  const factory = findFactoryForLogin(data, record.factory_id || record.factoryId);
+  if (!factory) return { ok: false, error: "Factory record nahi mila" };
+  const baseKey = record.role === "worker" ? "garmentworks_db_workers" : "garmentworks_db_staff";
+  const dataKey = dataKeyForFactory(data, baseKey, factory);
+  const rows = parseJsonValue(data[dataKey], []);
+  const userId = String(record.user_id || record.userId || "");
+  const nextRows = (Array.isArray(rows) ? rows : []).map((row) => {
+    if (String(userIdentity(row)) === userId) return { ...row, password: newPassword };
+    return row;
+  });
+  const changed = JSON.stringify(rows) !== JSON.stringify(nextRows);
+  if (!changed) return { ok: false, error: "User record nahi mila" };
+
+  const saved = await syncDatabase({ [dataKey]: JSON.stringify(nextRows) }, []);
+  await markOtpAttempt(resetId, true);
+  return {
+    ok: true,
+    storage: saved.storage,
+    updatedAt: saved.updatedAt,
+    message: "Password OTP verify hone ke baad update ho gaya.",
+  };
 }
 
 async function syncDatabase(incomingData, removedKeys) {
@@ -593,6 +805,36 @@ async function handleDatabaseApi(request, response) {
       sendJson(response, 200, result);
     } catch (error) {
       sendJson(response, 400, { ok: false, error: error.message || "Login failed" });
+    }
+    return true;
+  }
+
+  if (parsed.pathname === "/api/auth/password-reset/request" && request.method === "POST") {
+    try {
+      if (!isAllowedOrigin(request)) {
+        sendJson(response, 403, { ok: false, error: "Request origin is not allowed" });
+        return true;
+      }
+      const body = await readJsonBody(request);
+      const result = await requestPasswordReset(body);
+      sendJson(response, result.ok ? 200 : 401, result);
+    } catch (error) {
+      sendJson(response, 400, { ok: false, error: error.message || "OTP request failed" });
+    }
+    return true;
+  }
+
+  if (parsed.pathname === "/api/auth/password-reset/verify" && request.method === "POST") {
+    try {
+      if (!isAllowedOrigin(request)) {
+        sendJson(response, 403, { ok: false, error: "Request origin is not allowed" });
+        return true;
+      }
+      const body = await readJsonBody(request);
+      const result = await verifyPasswordReset(body);
+      sendJson(response, result.ok ? 200 : 401, result);
+    } catch (error) {
+      sendJson(response, 400, { ok: false, error: error.message || "OTP verify failed" });
     }
     return true;
   }
