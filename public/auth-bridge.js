@@ -59,6 +59,25 @@
     box.textContent = message;
   }
 
+  function passwordInputs(form) {
+    return Array.from(form.querySelectorAll('input[type="password"], [name="password"], [name="newPassword"], [name="confirmPassword"]'));
+  }
+
+  function setPasswordInputsVisible(form, visible) {
+    passwordInputs(form).forEach((input) => {
+      const wrap = input.closest("label, .field, .form-field") || input;
+      if (form.dataset.resetToken || visible) {
+        input.disabled = false;
+        input.required = true;
+        wrap.style.display = "";
+      } else {
+        input.disabled = true;
+        input.required = false;
+        wrap.style.display = "none";
+      }
+    });
+  }
+
   function writeSnapshot(data) {
     Object.entries(data || {}).forEach(([key, storedValue]) => {
       if (key.startsWith("garmentworks_")) nativeSetItem.call(window.localStorage, key, String(storedValue));
@@ -109,6 +128,7 @@
   }
 
   async function requestOtp(form, role) {
+    setPasswordInputsVisible(form, false);
     const payload = {
       role,
       factoryCode: value(form, "factoryCode"),
@@ -125,34 +145,65 @@
     const result = await response.json().catch(() => ({ ok: false, error: "OTP request failed" }));
     if (!response.ok || !result.ok) throw new Error(result.error || "OTP request failed");
     form.dataset.resetId = result.resetId;
+    form.dataset.resetToken = "";
     ensureOtpField(form).focus();
     const button = form.querySelector('button[type="submit"], button');
-    if (button) button.textContent = "Verify OTP & Change Password";
+    if (button) button.textContent = "Verify OTP";
     showSuccess(form, `${result.message || "OTP send ho gaya."} Contact: ${result.contact || "***"}`);
     if (result.debugOtp) showSuccess(form, `Testing OTP: ${result.debugOtp}`);
   }
 
-  async function verifyOtpAndChangePassword(form) {
-    const response = await fetch("/api/auth/password-reset/verify", {
+  async function verifyOtpOnly(form) {
+    const response = await fetch("/api/auth/password-reset/verify-otp", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "same-origin",
       body: JSON.stringify({
         resetId: form.dataset.resetId,
         otp: value(form, "otp"),
-        password: passwordValue(form),
       }),
     });
     const result = await response.json().catch(() => ({ ok: false, error: "OTP verify failed" }));
     if (!response.ok || !result.ok) throw new Error(result.error || "OTP verify failed");
+    form.dataset.resetToken = result.resetToken;
+    setPasswordInputsVisible(form, true);
+    const button = form.querySelector('button[type="submit"], button');
+    if (button) button.textContent = "Change Password";
+    showSuccess(form, result.message || "OTP verify ho gaya. Ab naya password set karo.");
+  }
+
+  async function changePasswordAfterOtp(form) {
+    const response = await fetch("/api/auth/password-reset/change", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({
+        resetToken: form.dataset.resetToken,
+        password: passwordValue(form),
+      }),
+    });
+    const result = await response.json().catch(() => ({ ok: false, error: "Password change failed" }));
+    if (!response.ok || !result.ok) throw new Error(result.error || "Password change failed");
     showSuccess(form, result.message || "Password change ho gaya. Ab login karo.");
     form.dataset.resetId = "";
+    form.dataset.resetToken = "";
     if (window.__garmentworksDb?.flush) await window.__garmentworksDb.flush();
   }
 
   function handleForgotPassword(form, role) {
-    if (form.dataset.resetId) return verifyOtpAndChangePassword(form);
+    if (form.dataset.resetToken) return changePasswordAfterOtp(form);
+    if (form.dataset.resetId) return verifyOtpOnly(form);
     return requestOtp(form, role);
+  }
+
+  function prepareForgotForms() {
+    document.querySelectorAll("form").forEach((form) => {
+      if (!(form instanceof HTMLFormElement)) return;
+      if (formMode(form) !== "forgot") return;
+      if (!form.dataset.resetToken) setPasswordInputsVisible(form, false);
+      const button = form.querySelector('button[type="submit"], button');
+      if (button && !form.dataset.resetId && !form.dataset.resetToken) button.textContent = "Send OTP";
+    });
   }
 
   document.addEventListener(
@@ -182,4 +233,8 @@
     },
     true,
   );
+
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", prepareForgotForms);
+  else prepareForgotForms();
+  new MutationObserver(prepareForgotForms).observe(document.documentElement, { childList: true, subtree: true });
 })();
