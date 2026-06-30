@@ -13,6 +13,10 @@ const maxJsonBodyBytes = 25 * 1024 * 1024;
 const postgresConnectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL || "";
 let postgresPoolPromise = null;
 let postgresUnavailableReason = "";
+const rateLimitWindowMs = Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000);
+const apiRateLimitMax = Number(process.env.API_RATE_LIMIT_MAX || 180);
+const syncRateLimitMax = Number(process.env.SYNC_RATE_LIMIT_MAX || 60);
+const rateLimitBuckets = new Map();
 
 const mimeTypes = {
   ".css": "text/css; charset=utf-8",
@@ -33,6 +37,87 @@ const mimeTypes = {
 
 function ensureDataRoot() {
   mkdirSync(dataRoot, { recursive: true });
+}
+
+function securityHeaders(contentType) {
+  return {
+    "Content-Type": contentType,
+    "Cache-Control": contentType.startsWith("text/html") ? "no-store" : "public, max-age=3600",
+    "Content-Security-Policy":
+      "default-src 'self'; img-src 'self' data: blob:; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'self'; frame-ancestors 'none'",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "X-Robots-Tag": "noindex, nofollow",
+  };
+}
+
+function getClientIp(request) {
+  const forwarded = request.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.trim()) return forwarded.split(",")[0].trim();
+  return request.socket.remoteAddress || "unknown";
+}
+
+function getRequestHost(request) {
+  const proto = request.headers["x-forwarded-proto"] || "http";
+  const host = request.headers["x-forwarded-host"] || request.headers.host || "localhost";
+  return `${proto}://${host}`;
+}
+
+function isAllowedOrigin(request) {
+  const origin = request.headers.origin;
+  if (!origin) return true;
+
+  try {
+    const requestOrigin = new URL(getRequestHost(request)).origin;
+    return new URL(origin).origin === requestOrigin;
+  } catch {
+    return false;
+  }
+}
+
+function applyRateLimit(request, maxRequests) {
+  const ip = getClientIp(request);
+  const parsed = new URL(request.url || "/", "http://localhost");
+  const bucketKey = `${ip}:${parsed.pathname}`;
+  const now = Date.now();
+  const current = rateLimitBuckets.get(bucketKey);
+
+  if (!current || now > current.resetAt) {
+    rateLimitBuckets.set(bucketKey, { count: 1, resetAt: now + rateLimitWindowMs });
+    return { allowed: true, remaining: Math.max(0, maxRequests - 1), resetAt: now + rateLimitWindowMs };
+  }
+
+  current.count += 1;
+  if (current.count > maxRequests) {
+    return { allowed: false, remaining: 0, resetAt: current.resetAt };
+  }
+
+  return { allowed: true, remaining: Math.max(0, maxRequests - current.count), resetAt: current.resetAt };
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, bucket] of rateLimitBuckets.entries()) {
+    if (now > bucket.resetAt) rateLimitBuckets.delete(key);
+  }
+}, rateLimitWindowMs).unref();
+
+function attachRequestLogger(request, response) {
+  const start = Date.now();
+  response.on("finish", () => {
+    const parsed = new URL(request.url || "/", "http://localhost");
+    console.log(JSON.stringify({
+      at: new Date().toISOString(),
+      method: request.method,
+      path: parsed.pathname,
+      status: response.statusCode,
+      durationMs: Date.now() - start,
+      ip: getClientIp(request),
+      userAgent: request.headers["user-agent"] || "",
+    }));
+  });
 }
 
 function readJsonDatabase() {
@@ -93,6 +178,7 @@ async function getPostgresPool() {
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
           )
         `);
+        await pool.query("CREATE INDEX IF NOT EXISTS garmentworks_kv_updated_at_idx ON garmentworks_kv (updated_at DESC)");
         await migrateJsonDatabaseToPostgres(pool);
         postgresUnavailableReason = "";
         return pool;
@@ -220,7 +306,7 @@ function isDatabaseKey(key) {
 
 function sendJson(response, status, body) {
   response.writeHead(status, {
-    "Content-Type": "application/json; charset=utf-8",
+    ...securityHeaders("application/json; charset=utf-8"),
     "Cache-Control": "no-store",
   });
   response.end(JSON.stringify(body));
@@ -256,6 +342,35 @@ function readJsonBody(request) {
 
 async function handleDatabaseApi(request, response) {
   const parsed = new URL(request.url || "/", "http://localhost");
+
+  if (parsed.pathname === "/api/health" && request.method === "GET") {
+    const pool = await getPostgresPool();
+    if (pool) await pool.query("SELECT 1");
+    sendJson(response, 200, {
+      ok: true,
+      storage: pool ? "postgres" : "json-fallback",
+      uptimeSeconds: Math.round(process.uptime()),
+      timestamp: new Date().toISOString(),
+    });
+    return true;
+  }
+
+  if (parsed.pathname.startsWith("/api/db")) {
+    const maxRequests = parsed.pathname === "/api/db/sync" ? syncRateLimitMax : apiRateLimitMax;
+    const rateLimit = applyRateLimit(request, maxRequests);
+    response.setHeader("RateLimit-Limit", String(maxRequests));
+    response.setHeader("RateLimit-Remaining", String(rateLimit.remaining));
+    response.setHeader("RateLimit-Reset", String(Math.ceil(rateLimit.resetAt / 1000)));
+    if (!rateLimit.allowed) {
+      sendJson(response, 429, { ok: false, error: "Too many requests. Please try again shortly." });
+      return true;
+    }
+  }
+
+  if (request.method !== "GET" && parsed.pathname.startsWith("/api/db") && !isAllowedOrigin(request)) {
+    sendJson(response, 403, { ok: false, error: "Request origin is not allowed" });
+    return true;
+  }
 
   if (request.method === "GET" && parsed.pathname === "/api/db/snapshot") {
     const snapshot = await readDatabase();
@@ -310,18 +425,16 @@ function fileForUrl(url) {
 
 function sendFile(response, filePath) {
   const stream = createReadStream(filePath);
-  response.writeHead(200, {
-    "Content-Type": mimeTypes[extname(filePath).toLowerCase()] || "application/octet-stream",
-    "Cache-Control": extname(filePath) === ".html" ? "no-store" : "public, max-age=3600",
-  });
+  response.writeHead(200, securityHeaders(mimeTypes[extname(filePath).toLowerCase()] || "application/octet-stream"));
   stream.pipe(response);
   stream.on("error", () => {
-    response.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+    response.writeHead(500, securityHeaders("text/plain; charset=utf-8"));
     response.end("Server error");
   });
 }
 
 createServer(async (request, response) => {
+  attachRequestLogger(request, response);
   if (!request.url) {
     response.writeHead(400);
     response.end("Bad request");
