@@ -24,6 +24,13 @@ const sessionSecret = process.env.APP_SESSION_SECRET || process.env.SESSION_SECR
 const otpExpiryMinutes = Number(process.env.OTP_EXPIRY_MINUTES || 10);
 const otpMaxAttempts = Number(process.env.OTP_MAX_ATTEMPTS || 5);
 const memoryOtpStore = new Map();
+const smtpHost = process.env.SMTP_HOST || "smtp-relay.brevo.com";
+const smtpPort = Number(process.env.SMTP_PORT || 587);
+const smtpSecure = String(process.env.SMTP_SECURE || "").toLowerCase() === "true" || smtpPort === 465;
+const smtpUser = process.env.SMTP_USER || process.env.BREVO_SMTP_USER || "";
+const smtpPass = process.env.SMTP_PASS || process.env.BREVO_SMTP_KEY || "";
+const smtpFrom = process.env.SMTP_FROM || smtpUser;
+let smtpTransportPromise = null;
 
 const mimeTypes = {
   ".css": "text/css; charset=utf-8",
@@ -193,6 +200,93 @@ function attachRequestLogger(request, response) {
       userAgent: request.headers["user-agent"] || "",
     }));
   });
+}
+
+function hasSmtpConfig() {
+  return Boolean(smtpHost && smtpPort && smtpUser && smtpPass && smtpFrom);
+}
+
+async function getSmtpTransport() {
+  if (!hasSmtpConfig()) return null;
+  if (!smtpTransportPromise) {
+    smtpTransportPromise = (async () => {
+      const { default: nodemailer } = await import("nodemailer");
+      return nodemailer.createTransport({
+        host: smtpHost,
+        port: smtpPort,
+        secure: smtpSecure,
+        auth: {
+          user: smtpUser,
+          pass: smtpPass,
+        },
+      });
+    })();
+  }
+  return smtpTransportPromise;
+}
+
+function isEmail(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || "").trim());
+}
+
+async function deliverOtp(record, otp, target) {
+  const contact = String(record.contact || "").trim();
+  if (isEmail(contact) && hasSmtpConfig()) {
+    try {
+      const transport = await getSmtpTransport();
+      await transport.sendMail({
+        from: smtpFrom,
+        to: contact,
+        subject: "GarmentWorks Password Reset OTP",
+        text: [
+          `Hello ${target.user?.name || "GarmentWorks user"},`,
+          "",
+          `Your password reset OTP is: ${otp}`,
+          `This OTP will expire in ${otpExpiryMinutes} minutes.`,
+          "",
+          "If you did not request this reset, please ignore this email.",
+        ].join("\n"),
+        html: `
+          <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111827">
+            <h2>GarmentWorks Password Reset OTP</h2>
+            <p>Hello ${String(target.user?.name || "GarmentWorks user").replace(/[<>]/g, "")},</p>
+            <p>Your password reset OTP is:</p>
+            <p style="font-size:28px;font-weight:800;letter-spacing:4px">${otp}</p>
+            <p>This OTP will expire in ${otpExpiryMinutes} minutes.</p>
+            <p>If you did not request this reset, please ignore this email.</p>
+          </div>
+        `,
+      });
+      console.log(JSON.stringify({
+        at: new Date().toISOString(),
+        event: "password_reset_otp_email_sent",
+        resetId: record.resetId,
+        role: record.role,
+        factoryId: record.factoryId,
+        contact: maskContact(contact),
+      }));
+      return { delivery: "email", message: "OTP registered email par send ho gaya." };
+    } catch (error) {
+      console.error("SMTP OTP delivery failed:", error);
+    }
+  }
+
+  console.log(JSON.stringify({
+    at: new Date().toISOString(),
+    event: "password_reset_otp",
+    resetId: record.resetId,
+    role: record.role,
+    factoryId: record.factoryId,
+    contact: maskContact(contact),
+    otp,
+    expiresAt: record.expiresAt,
+  }));
+  return {
+    delivery: "railway-logs",
+    message: hasSmtpConfig()
+      ? "Email send nahi ho paaya. OTP Railway logs me available hai."
+      : "SMTP configure nahi hai. OTP Railway logs me available hai.",
+  };
 }
 
 function readJsonDatabase() {
@@ -634,25 +728,15 @@ async function requestPasswordReset(body) {
     expiresAt,
   };
   await storeOtp(record);
-
-  console.log(JSON.stringify({
-    at: new Date().toISOString(),
-    event: "password_reset_otp",
-    resetId,
-    role: target.role,
-    factoryId: target.factory.id,
-    contact: maskContact(target.contact),
-    otp,
-    expiresAt,
-  }));
+  const delivery = await deliverOtp(record, otp, target);
 
   return {
     ok: true,
     resetId,
     expiresAt,
     contact: maskContact(target.contact),
-    delivery: process.env.OTP_DELIVERY_MODE || "railway-logs",
-    message: "OTP registered contact par send ho gaya. Delivery provider na ho to Railway logs me OTP milega.",
+    delivery: delivery.delivery,
+    message: delivery.message,
     debugOtp: process.env.OTP_DEBUG_RESPONSE === "1" ? otp : undefined,
   };
 }
@@ -771,6 +855,7 @@ async function handleDatabaseApi(request, response) {
     sendJson(response, 200, {
       ok: true,
       storage: pool ? "postgres" : "json-fallback",
+      smtp: hasSmtpConfig() ? "configured" : "not-configured",
       uptimeSeconds: Math.round(process.uptime()),
       timestamp: new Date().toISOString(),
     });
