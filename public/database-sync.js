@@ -128,6 +128,30 @@
     }
   }
 
+  function hydrateFromDatabaseBeforeAppBoot() {
+    try {
+      const request = new XMLHttpRequest();
+      request.open("GET", `${API_BASE}/snapshot?boot=${Date.now()}`, false);
+      request.send(null);
+      if (request.status < 200 || request.status >= 300) return null;
+
+      const payload = JSON.parse(request.responseText || "{}");
+      const remoteData = payload && payload.data && typeof payload.data === "object" ? payload.data : {};
+      Object.entries(remoteData).forEach(([key, value]) => {
+        if (isAppKey(key)) nativeStorage.setItem.call(window.localStorage, key, String(value));
+      });
+
+      window.__garmentworksDbStatus = { ok: true, lastBootHydrate: new Date().toISOString() };
+      window.setTimeout(() => {
+        window.dispatchEvent(new CustomEvent("garmentworks-db-ready", { detail: payload }));
+      }, 0);
+      return payload;
+    } catch (error) {
+      window.__garmentworksDbStatus = { ok: false, error: error.message || "Database boot hydrate failed" };
+      return null;
+    }
+  }
+
   Storage.prototype.setItem = function (key, value) {
     const result = nativeStorage.setItem.call(this, key, value);
     if (this === window.localStorage) queueSet(key, value);
@@ -161,5 +185,8 @@
   });
   window.addEventListener("beforeunload", sendPendingWithBeacon);
 
-  window.__garmentworksDbReady = hydrateFromDatabase();
+  const bootPayload = hydrateFromDatabaseBeforeAppBoot();
+  pendingData = { ...getLocalSnapshot(), ...pendingData };
+  scheduleFlush();
+  window.__garmentworksDbReady = bootPayload ? Promise.resolve(bootPayload) : hydrateFromDatabase();
 })();
