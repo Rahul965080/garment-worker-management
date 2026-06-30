@@ -309,6 +309,5 @@
   }, true);
   window.addEventListener("storage", scheduleRender);
   new MutationObserver(scheduleRender).observe(document.documentElement, { childList: true, subtree: true });
-  setInterval(render, 1000);
   render();
 })();
