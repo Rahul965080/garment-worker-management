@@ -80,6 +80,15 @@
         font-weight: 800;
         line-height: 1.35;
       }
+
+      .role-login-card {
+        cursor: pointer;
+      }
+
+      .role-login-card:focus-within,
+      .role-login-card:hover {
+        border-color: rgba(15, 118, 110, .32);
+      }
     `;
     document.head.appendChild(style);
   }
@@ -158,6 +167,13 @@
     },
     true
   );
+
+  document.addEventListener("click", (event) => {
+    const card = event.target?.closest?.(".role-login-card");
+    if (!card || event.target.closest("a, button, input, select, textarea")) return;
+    const link = card.querySelector("a[href]");
+    if (link?.href) window.location.href = link.href;
+  });
 
   let renderQueued = false;
   function scheduleRender() {
