@@ -572,6 +572,152 @@ function dataKeyForFactory(data, baseKey, factory) {
   return ids.length ? scopedKey(baseKey, ids[0]) : baseKey;
 }
 
+function factoryIdentitySet(factory) {
+  return new Set(
+    [factory?.id, factory?.code, factory?.factoryId, factory?.factoryCode]
+      .filter(Boolean)
+      .map((value) => String(value).trim())
+      .filter(Boolean),
+  );
+}
+
+function sameFactoryIdentity(factory, value) {
+  const raw = String(value || "").trim();
+  if (!raw) return false;
+  const code = cleanCode(raw);
+  const text = lower(raw);
+  return Array.from(factoryIdentitySet(factory)).some((item) => item === raw || cleanCode(item) === code || lower(item) === text);
+}
+
+function factoryForKey(data, key) {
+  const suffix = String(key || "").startsWith("garmentworks_db_staff_")
+    ? String(key).slice("garmentworks_db_staff_".length)
+    : String(key || "").startsWith("garmentworks_db_workers_")
+      ? String(key).slice("garmentworks_db_workers_".length)
+      : "";
+  if (!suffix) return null;
+  return factoriesFromData(data).map(normalizeFactory).filter(Boolean).find((factory) => sameFactoryIdentity(factory, suffix)) || null;
+}
+
+function accountIdentity(row) {
+  return {
+    email: lower(row?.email || row?.ownerEmail || row?.adminEmail || ""),
+    mobile: digits(row?.mobile || row?.ownerMobile || row?.adminMobile || row?.phone || ""),
+  };
+}
+
+function factoryCodeLabel(factory) {
+  return String(factory?.code || factory?.factoryCode || factory?.id || factory?.factoryId || "").trim();
+}
+
+function findAccountByIdentity(data, identity, excludeFactoryIds = []) {
+  const email = lower(identity?.email || "");
+  const mobile = digits(identity?.mobile || "");
+  if (!email && !mobile) return null;
+  const excluded = excludeFactoryIds.map((value) => String(value || "").trim()).filter(Boolean);
+
+  for (const factory of factoriesFromData(data).map(normalizeFactory).filter(Boolean)) {
+    if (excluded.some((id) => sameFactoryIdentity(factory, id))) continue;
+    const factoryIdentity = accountIdentity(factory);
+    if ((email && factoryIdentity.email === email) || (mobile && factoryIdentity.mobile === mobile)) {
+      return { factory, source: "factory" };
+    }
+
+    const staff = rowsForFactory(data, "garmentworks_db_staff", factory);
+    for (const row of staff) {
+      const rowIdentity = accountIdentity(row);
+      if ((email && rowIdentity.email === email) || (mobile && rowIdentity.mobile === mobile)) {
+        return { factory, source: lower(row.role) === "admin" ? "admin" : "staff" };
+      }
+    }
+  }
+  return null;
+}
+
+function findDuplicateCreateAccount(data, body) {
+  const identity = accountIdentity(body || {});
+  const match = findAccountByIdentity(data, identity);
+  if (!match) return null;
+  return {
+    factoryCode: factoryCodeLabel(match.factory),
+    factoryName: match.factory.name || match.factory.factoryName || "",
+    source: match.source,
+  };
+}
+
+function findIncomingDuplicateAccount(existingData, incomingData) {
+  const incomingFactories = parseJsonValue(incomingData.garmentworks_factories, null);
+  if (Array.isArray(incomingFactories)) {
+    for (const factory of incomingFactories.map(normalizeFactory).filter(Boolean)) {
+      const duplicate = findAccountByIdentity(existingData, accountIdentity(factory), Array.from(factoryIdentitySet(factory)));
+      if (duplicate) return { duplicate, incomingFactory: factory };
+    }
+  }
+
+  for (const [key, value] of Object.entries(incomingData || {})) {
+    if (!/^garmentworks_db_staff(_|$)/.test(key)) continue;
+    const rows = parseJsonValue(value, []);
+    if (!Array.isArray(rows)) continue;
+    const incomingFactory = factoryForKey({ ...existingData, ...incomingData }, key);
+    const exclude = incomingFactory ? Array.from(factoryIdentitySet(incomingFactory)) : [];
+    for (const row of rows) {
+      if (lower(row?.role) !== "admin") continue;
+      const duplicate = findAccountByIdentity(existingData, accountIdentity(row), exclude);
+      if (duplicate) return { duplicate, incomingFactory };
+    }
+  }
+
+  return null;
+}
+
+function recoverFactoriesByIdentity(data, body) {
+  const role = lower(body.role || body.portal || "");
+  if (!["admin", "staff", "worker"].includes(role)) return { ok: false, error: "Invalid portal" };
+  const rawQuery = String(body.query || body.email || body.mobile || body.workerId || "").trim();
+  if (rawQuery.length < 3) return { ok: false, error: "Registered detail kam se kam 3 character ka hona chahiye" };
+  const email = lower(rawQuery);
+  const mobile = digits(rawQuery);
+  const workerId = lower(rawQuery);
+  const matches = [];
+
+  for (const factory of factoriesFromData(data).map(normalizeFactory).filter(Boolean)) {
+    let found = false;
+    if (role === "admin") {
+      const factoryIdentity = accountIdentity(factory);
+      found = (email && factoryIdentity.email === email) || (mobile && factoryIdentity.mobile === mobile);
+    }
+
+    const staff = rowsForFactory(data, "garmentworks_db_staff", factory);
+    if (!found && role !== "worker") {
+      found = staff.some((row) => {
+        const isAdmin = lower(row.role) === "admin";
+        if (role === "admin" && !isAdmin) return false;
+        if (role === "staff" && isAdmin) return false;
+        const identity = accountIdentity(row);
+        return (email && identity.email === email) || (mobile && identity.mobile === mobile);
+      });
+    }
+
+    if (!found && role === "worker") {
+      const workers = rowsForFactory(data, "garmentworks_db_workers", factory);
+      found = workers.some((row) => {
+        const identity = accountIdentity(row);
+        return (mobile && identity.mobile === mobile) || (workerId && lower(row.workerId) === workerId);
+      });
+    }
+
+    if (found) {
+      matches.push({
+        id: factory.id,
+        code: factoryCodeLabel(factory),
+        name: factory.name || factory.factoryName || factoryCodeLabel(factory),
+      });
+    }
+  }
+
+  return matches.length ? { ok: true, matches } : { ok: false, error: "Is detail se factory code nahi mila." };
+}
+
 function isActive(row) {
   return String(row?.status || "Active").toLowerCase() === "active";
 }
@@ -1010,6 +1156,48 @@ async function handleDatabaseApi(request, response) {
     return true;
   }
 
+  if (parsed.pathname === "/api/auth/check-create-account" && request.method === "POST") {
+    try {
+      if (!isAllowedOrigin(request)) {
+        sendJson(response, 403, { ok: false, error: "Request origin is not allowed" });
+        return true;
+      }
+      const body = await readJsonBody(request);
+      const snapshot = await readDatabase();
+      const duplicate = findDuplicateCreateAccount(snapshot.data || {}, body);
+      if (duplicate) {
+        sendJson(response, 409, {
+          ok: false,
+          duplicate: true,
+          factoryCode: duplicate.factoryCode,
+          factoryName: duplicate.factoryName,
+          error: `Is email/mobile se account pehle se bana hua hai. Naya account create nahi hoga. Old Factory Code: ${duplicate.factoryCode}`,
+        });
+        return true;
+      }
+      sendJson(response, 200, { ok: true });
+    } catch (error) {
+      sendJson(response, 400, { ok: false, error: error.message || "Duplicate account check failed" });
+    }
+    return true;
+  }
+
+  if (parsed.pathname === "/api/auth/recover-factory-code" && request.method === "POST") {
+    try {
+      if (!isAllowedOrigin(request)) {
+        sendJson(response, 403, { ok: false, error: "Request origin is not allowed" });
+        return true;
+      }
+      const body = await readJsonBody(request);
+      const snapshot = await readDatabase();
+      const result = recoverFactoriesByIdentity(snapshot.data || {}, body);
+      sendJson(response, result.ok ? 200 : 404, result);
+    } catch (error) {
+      sendJson(response, 400, { ok: false, error: error.message || "Factory code recovery failed" });
+    }
+    return true;
+  }
+
   if (parsed.pathname === "/api/auth/password-reset/request" && request.method === "POST") {
     try {
       if (!isAllowedOrigin(request)) {
@@ -1109,6 +1297,14 @@ async function handleDatabaseApi(request, response) {
         sendJson(response, 403, {
           ok: false,
           error: "Password change sirf OTP verification ke baad allowed hai.",
+        });
+        return true;
+      }
+      const duplicate = findIncomingDuplicateAccount(current.data || {}, incomingData);
+      if (duplicate) {
+        sendJson(response, 409, {
+          ok: false,
+          error: `Duplicate account blocked. Is email/mobile ka old Factory Code: ${factoryCodeLabel(duplicate.duplicate.factory)}`,
         });
         return true;
       }
