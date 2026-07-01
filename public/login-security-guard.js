@@ -223,6 +223,19 @@
     return `Is email/mobile se account pehle se bana hua hai. Naya account create nahi hoga. Old Factory Code: ${code}`;
   }
 
+  async function validateCreateAccountOnServer(form) {
+    const values = formValues(form);
+    const response = await fetch("/api/auth/check-create-account", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify(values),
+    });
+    const result = await response.json().catch(() => ({ ok: false, error: "Duplicate account check failed" }));
+    if (!response.ok || !result.ok) return result.error || "Is email/mobile se account pehle se bana hua hai.";
+    return "";
+  }
+
   function validateLogin(form, type, factory) {
     if (!factory) return "Factory code/name nahi mila. Sahi factory code ya exact factory name daalo.";
     const password = field(form, "password");
@@ -312,6 +325,26 @@
         event.preventDefault();
         event.stopImmediatePropagation();
         showError(form, message);
+        return;
+      }
+      if (form.dataset.serverDuplicateChecked !== "true") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        validateCreateAccountOnServer(form)
+          .then((serverMessage) => {
+            if (serverMessage) {
+              showError(form, serverMessage);
+              return;
+            }
+            form.dataset.serverDuplicateChecked = "true";
+            clearError(form);
+            if (typeof form.requestSubmit === "function") form.requestSubmit();
+            else form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+            window.setTimeout(() => {
+              delete form.dataset.serverDuplicateChecked;
+            }, 500);
+          })
+          .catch((error) => showError(form, error.message || "Duplicate account check failed. Dobara try karo."));
         return;
       }
       clearError(form);
