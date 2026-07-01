@@ -878,12 +878,22 @@ async function storeOtp(record) {
   if (pool) {
     await pool.query("DELETE FROM garmentworks_password_reset_otps WHERE expires_at < NOW() OR used_at IS NOT NULL");
     await pool.query(
+      `DELETE FROM garmentworks_password_reset_otps
+       WHERE role = $1 AND factory_id = $2 AND user_id = $3 AND used_at IS NULL`,
+      [record.role, record.factoryId, record.userId],
+    );
+    await pool.query(
       `INSERT INTO garmentworks_password_reset_otps
        (reset_id, role, factory_id, user_id, contact, otp_hash, expires_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [record.resetId, record.role, record.factoryId, record.userId, record.contact, record.otpHash, record.expiresAt],
     );
     return;
+  }
+  for (const [resetId, row] of memoryOtpStore.entries()) {
+    if (row.role === record.role && row.factoryId === record.factoryId && row.userId === record.userId && !row.usedAt) {
+      memoryOtpStore.delete(resetId);
+    }
   }
   memoryOtpStore.set(record.resetId, { ...record, attempts: 0, usedAt: null });
 }
