@@ -322,9 +322,34 @@
     modal.querySelector("input")?.focus();
   }
 
-  function renderResults(modal, query, type) {
+  async function recoverFactories(query, type) {
+    const response = await fetch("/api/auth/recover-factory-code", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ role: type, query }),
+    });
+    const result = await response.json().catch(() => ({ ok: false, error: "Factory code recovery failed" }));
+    if (!response.ok || !result.ok) throw new Error(result.error || "Factory code nahi mila.");
+    return Array.isArray(result.matches) ? result.matches : [];
+  }
+
+  async function renderResults(modal, query, type) {
     const box = modal.querySelector(".factory-recovery-result");
-    const matches = query.trim().length >= 3 ? findFactories(query, type) : [];
+    if (query.trim().length < 3) {
+      box.innerHTML = `<div class="factory-recovery-error">Registered detail kam se kam 3 character ka hona chahiye.</div>`;
+      return;
+    }
+
+    box.innerHTML = `<div class="factory-recovery-note">Checking registered account...</div>`;
+    let matches = [];
+    try {
+      matches = await recoverFactories(query, type);
+    } catch (error) {
+      box.innerHTML = `<div class="factory-recovery-error">${escapeHtml(error.message || `Is detail se factory code nahi mila.`)}</div>`;
+      return;
+    }
+
     if (!matches.length) {
       box.innerHTML = `<div class="factory-recovery-error">Is detail se factory code nahi mila. Registered ${escapeHtml(portalLabel(type))} check karo ya admin se contact karo.</div>`;
       return;
