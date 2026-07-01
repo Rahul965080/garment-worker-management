@@ -175,6 +175,10 @@
     return factories().map(factorySummary);
   }
 
+  function factoryCodeCount(summaries = allSummaries()) {
+    return new Set(summaries.map((item) => cleanCode(item.code || item.id)).filter(Boolean)).size;
+  }
+
   function totals(summaries) {
     return summaries.reduce(
       (total, item) => {
@@ -188,9 +192,10 @@
         else if (item.status === "Expired") total.expired += 1;
         else if (item.status === "Suspended") total.suspended += 1;
         else total.trial += 1;
+        total.factoryCodes = factoryCodeCount(summaries);
         return total;
       },
-      { factories: 0, staff: 0, admins: 0, workers: 0, products: 0, entries: 0, active: 0, expired: 0, suspended: 0, trial: 0 }
+      { factories: 0, factoryCodes: 0, staff: 0, admins: 0, workers: 0, products: 0, entries: 0, active: 0, expired: 0, suspended: 0, trial: 0 }
     );
   }
 
@@ -605,6 +610,7 @@
           </div>
           ${notice ? `<div class="super-note">${escapeHtml(notice)}</div>` : ""}
           <div class="super-kpis">
+            ${kpi("Factory Codes", number(total.factoryCodes))}
             ${kpi("Companies", number(total.factories))}
             ${kpi("Active", number(total.active))}
             ${kpi("Trial", number(total.trial))}
@@ -613,6 +619,7 @@
             ${kpi("Total Users", number(total.staff + total.workers))}
           </div>
           <section class="super-panel">
+            <div class="super-note">Total Factory Codes: ${number(factoryCodeCount(shown))} · Showing Companies: ${number(shown.length)}</div>
             <div class="super-filter-row">
               ${field("Search Company", `<input data-super-filter="search" value="${escapeHtml(filters.search)}" placeholder="Factory name, code, owner, email...">`)}
               ${field(
