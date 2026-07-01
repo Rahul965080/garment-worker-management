@@ -223,6 +223,10 @@
     return factories().map(summary);
   }
 
+  function factoryCodeCount(rows = summaries()) {
+    return new Set(rows.map((item) => clean(item.code || item.id)).filter(Boolean)).size;
+  }
+
   function duplicateAlerts() {
     const fields = [
       ["Email", (x) => lower(x.email)],
@@ -255,6 +259,7 @@
     const dueSoon = rows.filter((x) => x.expiresAt && x.expiresAt >= today && x.expiresAt <= daysFromNow(7)).length;
     return {
       total: rows.length,
+      factoryCodes: factoryCodeCount(rows),
       active: rows.filter((x) => x.status === "Active").length,
       trial: rows.filter((x) => x.status === "Trial").length,
       expired: rows.filter((x) => x.status === "Expired").length,
@@ -409,7 +414,8 @@
     const recent = logs().slice(0, 6).map((log) => `<div class="sa-log-item"><strong>${esc(log.action)}</strong><span>${esc(log.company)} · ${esc(new Date(log.date).toLocaleString())}</span></div>`).join("") || `<p class="sa-sub">Abhi activity log empty hai.</p>`;
     return `
       <div class="sa-grid">
-        ${kpi("Companies", num(t.total))}${kpi("Active", num(t.active))}${kpi("Trial", num(t.trial))}${kpi("Expired", num(t.expired))}${kpi("Suspended", num(t.suspended))}${kpi("Deleted", num(t.deleted))}
+        ${kpi("Factory Codes", num(t.factoryCodes))}${kpi("Companies", num(t.total))}${kpi("Active", num(t.active))}${kpi("Trial", num(t.trial))}${kpi("Expired", num(t.expired))}${kpi("Suspended", num(t.suspended))}
+        ${kpi("Deleted", num(t.deleted))}
         ${kpi("Duplicate Alerts", num(t.duplicates))}${kpi("Today's New", num(t.today))}${kpi("Monthly New", num(t.monthly))}${kpi("Total Revenue", money(t.revenue))}${kpi("Renewal Due", num(t.dueSoon))}${kpi("Storage", mb(t.storage))}
       </div>
       <div class="sa-two">
@@ -422,8 +428,10 @@
 
   function companyTable() {
     const rows = filteredCompanies();
+    const codeCount = factoryCodeCount(rows);
     return `
       <section class="sa-card sa-panel">
+        <div class="sa-note">Total Factory Codes: ${num(codeCount)} · Showing Companies: ${num(rows.length)}</div>
         <div class="sa-filter">
           ${field("Search", `<input data-sa-filter="search" value="${esc(filters.search)}" placeholder="Name, owner, email, mobile, GST, PAN, plan...">`)}
           ${field("Status", `<select data-sa-filter="status"><option value="all">All</option>${["active", "trial", "expired", "suspended", "deleted"].map((s) => `<option value="${s}"${filters.status === s ? " selected" : ""}>${s[0].toUpperCase() + s.slice(1)}</option>`).join("")}</select>`)}
