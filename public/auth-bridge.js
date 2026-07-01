@@ -132,8 +132,31 @@
     return wrap.querySelector("input");
   }
 
-  async function requestOtp(form, role) {
+  function ensureResendButton(form) {
+    let button = form.querySelector("[data-otp-resend]");
+    if (button) return button;
+
+    button = document.createElement("button");
+    button.type = "button";
+    button.dataset.otpResend = "true";
+    button.className = "factory-code-link otp-resend-button";
+    button.textContent = "Resend OTP";
+    button.hidden = true;
+    const submitButton = form.querySelector('button[type="submit"], button:not([data-otp-resend])');
+    if (submitButton) submitButton.insertAdjacentElement("afterend", button);
+    else form.appendChild(button);
+    return button;
+  }
+
+  function setResendVisible(form, visible) {
+    const button = ensureResendButton(form);
+    button.hidden = !visible;
+    button.disabled = !visible;
+  }
+
+  async function requestOtp(form, role, isResend = false) {
     setPasswordInputsVisible(form, false);
+    setResendVisible(form, false);
     const payload = {
       role,
       factoryCode: value(form, "factoryCode"),
@@ -151,9 +174,12 @@
     if (!response.ok || !result.ok) throw new Error(result.error || "OTP request failed");
     form.dataset.resetId = result.resetId;
     form.dataset.resetToken = "";
-    ensureOtpField(form).focus();
+    const otpInput = ensureOtpField(form);
+    otpInput.value = "";
+    otpInput.focus();
     setButtonText(form, "Verify OTP");
-    showSuccess(form, `${result.message || "OTP send ho gaya."} Contact: ${result.contact || "***"}`);
+    setResendVisible(form, true);
+    showSuccess(form, `${isResend ? "New OTP send ho gaya." : result.message || "OTP send ho gaya."} Contact: ${result.contact || "***"}`);
     if (result.debugOtp) showSuccess(form, `Testing OTP: ${result.debugOtp}`);
   }
 
@@ -171,6 +197,7 @@
     if (!response.ok || !result.ok) throw new Error(result.error || "OTP verify failed");
     form.dataset.resetToken = result.resetToken;
     setPasswordInputsVisible(form, true);
+    setResendVisible(form, false);
     setButtonText(form, "Change Password");
     showSuccess(form, result.message || "OTP verify ho gaya. Ab naya password set karo.");
   }
@@ -190,6 +217,7 @@
     showSuccess(form, result.message || "Password change ho gaya. Ab login karo.");
     form.dataset.resetId = "";
     form.dataset.resetToken = "";
+    setResendVisible(form, false);
     if (window.__garmentworksDb?.flush) await window.__garmentworksDb.flush();
   }
 
@@ -205,8 +233,32 @@
       if (formMode(form) !== "forgot") return;
       if (!form.dataset.resetToken) setPasswordInputsVisible(form, false);
       if (!form.dataset.resetId && !form.dataset.resetToken) setButtonText(form, "Send OTP");
+      setResendVisible(form, Boolean(form.dataset.resetId && !form.dataset.resetToken));
     });
   }
+
+  document.addEventListener(
+    "click",
+    (event) => {
+      const button = event.target?.closest?.("[data-otp-resend]");
+      if (!button) return;
+      const form = button.closest("form");
+      const role = routeRole();
+      if (!(form instanceof HTMLFormElement) || !role) return;
+      event.preventDefault();
+      button.disabled = true;
+      button.textContent = "Sending OTP...";
+      requestOtp(form, role, true)
+        .catch((error) => {
+          showError(form, error.message || "OTP resend failed");
+          button.disabled = false;
+        })
+        .finally(() => {
+          button.textContent = "Resend OTP";
+        });
+    },
+    true,
+  );
 
   document.addEventListener(
     "submit",
